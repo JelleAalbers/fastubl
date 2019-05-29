@@ -128,7 +128,7 @@ class FastUnbinned:
                         / self._inner_term(p_obs, mus)),
                     axis=1))
 
-    def optimize(self, p_obs, present, guess):
+    def optimize(self, p_obs, present, guess=None):
         """Return (best-fit signal rate mu_hat,
                    likelihood at mu_hat)
         :param guess_mu: guess for signal rate
@@ -138,6 +138,10 @@ class FastUnbinned:
 
         def objective(mu_signal):
             return - 2 * np.sum(self.ll(mu_signal, p_obs, present))
+
+        if guess is None:
+            guess = self.true_mu[0]
+        guess = guess * np.ones(len(p_obs))
 
         optresult = minimize(
             objective,
@@ -153,7 +157,32 @@ class FastUnbinned:
         mu_hat = optresult.x
         return mu_hat, self.ll(mu_hat, p_obs, present)
 
-    def toy_llrs(self, n_trials=int(2e4), batch_size=400, mu_null=None):
+    def iter_toys(self, n_trials, batch_size, progress=True):
+        """Iterate over n_trials toy likelihoods in batches of size batch_size
+        Each iteration yields a dictionary with the following keys:
+          - p_obs, x_obs, present: see make_toys
+          - mu_hat, ll_best, see optimize
+          - n, the number of toy datasets in the batch.
+        """
+        n_batches = n_trials // batch_size + 1
+        last_batch_size = n_trials % batch_size
+
+        iter = range(n_batches)
+        if progress:
+            iter = tqdm(iter)
+
+        for batch_i in iter:
+            if batch_i == n_batches - 1 and last_batch_size != 0:
+                batch_size = last_batch_size
+
+            p_obs, x_obs, present = self.make_toys(batch_size)
+
+            mu_hat, ll_best = self.optimize(p_obs, present, guess=None)
+
+            yield dict(p_obs=p_obs, x_obs=x_obs, present=present,
+                       mu_hat=mu_hat, ll_best=ll_best, n=batch_size)
+
+    def toy_llrs(self, n_trials=int(2e4), batch_size=400, progress=True):
         """Return bestfit and -2 LLR for n_trials toy MCs.
 
         Result is a 2-tuple of numpy arrays, each of length n_trials:
@@ -163,25 +192,64 @@ class FastUnbinned:
         :param mu_null: Null hypothesis to test. Default is true signal rate.
         n_trials will be ceiled to batch size.
         """
-        if mu_null is None:
-            mu_null = self.true_mu[0]
-
-        n_batches = n_trials // batch_size + 1
-        mu_null = mu_null * np.ones(batch_size)
-
         bestfit = []
         result = []
-        for _ in tqdm(range(n_batches)):
-            p_obs, x_obs, present = self.make_toys(batch_size)
+        for r in self.iter_toys(n_trials, batch_size, progress):
+            mu_null = self.true_mu[0] * np.ones(r['n'])
+            ll_null = self.ll(mu_null, r['p_obs'], r['present'])
+            bestfit.append(r['mu_hat'])
+            result.append(-2 * (ll_null - r['ll_best']))
 
-            ll_null = self.ll(mu_null, p_obs, present)
+        return (np.concatenate(bestfit), np.concatenate(result))
 
-            mu_hat, ll_best = self.optimize(p_obs, present, guess=mu_null)
-            bestfit.append(mu_hat)
-            result.append(-2 * (ll_null - ll_best))
+    def toy_intervals(self, mu_s, critical_ts=None, kind='central',
+                      n_trials=int(2e4), batch_size=400, progress=True):
+        """Return n_trials (upper, lower) inclusive confidence interval bounds.
+        :param mu_s: Signal hypotheses to test
+        :param critical_ts: Critical values of the test statistic distribution,
+        array of same length as mu_s.
+        If not given, will use asymptotic 90th percentile values.
+        :param kind: 'central' for two-sided intervals (ordered by likelihood),
+        'upper' or 'lower' for one-sided limits.
 
-        return (np.concatenate(bestfit)[:n_trials],
-                np.concatenate(result)[:n_trials])
+        Other arguments are as for toy_llrs.
+        """
+        if critical_ts is None:
+            if kind == 'central':
+                critical_ts = stats.chi2(1).ppf(0.9)
+            else:
+                critical_ts = stats.chi2(1).ppf(0.8)
+            critical_ts = np.ones(len(mu_s)) * critical_ts
+
+        intervals = [[], []]
+        for r in self.iter_toys(n_trials, batch_size, progress):
+            # (signal hypothesis, trial index) matrix
+            is_included = np.zeros((len(mu_s), r['n']), dtype=np.int)
+
+            # For each signal strength, see if it is in the interval
+            # TODO: use optimizer instead, or at least offer the option
+            # TODO: duplicate LL computations with the ones inside optimize
+            for s_i, ms in enumerate(mu_s):
+                t = -2 * (self.ll(ms * np.ones(r['n']), r['p_obs'],
+                                  r['present'])
+                          - r['ll_best'])
+                if kind == 'upper':
+                    t[r['mu_hat'] > ms] = 0
+                elif kind == 'lower':
+                    t[r['mu_hat'] < ms] = 0
+                is_included[s_i, :] = t <= critical_ts[s_i]
+
+            # 0 is lower, 1 is upper
+            for side in (0, 1):
+                # Get a decreasing/increasing sequence for lower/upper limits
+                x = 1 + np.arange(len(mu_s), dtype=np.int)
+                if side == 0:
+                    x = 2 * len(mu_s) - x
+                # Zero excluded models. Limit is at highest number.
+                x = x[:, np.newaxis] * is_included
+                intervals[side].append(mu_s[np.argmax(x, axis=0)])
+
+        return np.concatenate(intervals[0]), np.concatenate(intervals[1])
 
 
 @numba.njit
