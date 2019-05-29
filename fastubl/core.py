@@ -140,7 +140,9 @@ class FastUnbinned:
             return - 2 * np.sum(self.ll(mu_signal, p_obs, present))
 
         if guess is None:
-            guess = self.true_mu[0]
+            # A guess very close to the bound is often bad
+            # so let's have the guess be 1 at least
+            guess = min(1, self.true_mu[0])
         guess = guess * np.ones(len(p_obs))
 
         optresult = minimize(
@@ -157,7 +159,7 @@ class FastUnbinned:
         mu_hat = optresult.x
         return mu_hat, self.ll(mu_hat, p_obs, present)
 
-    def iter_toys(self, n_trials, batch_size, progress=True):
+    def iter_toys(self, n_trials, batch_size, guess=None, progress=True):
         """Iterate over n_trials toy likelihoods in batches of size batch_size
         Each iteration yields a dictionary with the following keys:
           - p_obs, x_obs, present: see make_toys
@@ -177,12 +179,13 @@ class FastUnbinned:
 
             p_obs, x_obs, present = self.make_toys(batch_size)
 
-            mu_hat, ll_best = self.optimize(p_obs, present, guess=None)
+            mu_hat, ll_best = self.optimize(p_obs, present, guess=guess)
 
             yield dict(p_obs=p_obs, x_obs=x_obs, present=present,
                        mu_hat=mu_hat, ll_best=ll_best, n=batch_size)
 
-    def toy_llrs(self, n_trials=int(2e4), batch_size=400, progress=True):
+    def toy_llrs(self, n_trials=int(2e4), batch_size=400,
+                 guess=None, progress=True):
         """Return bestfit and -2 LLR for n_trials toy MCs.
 
         Result is a 2-tuple of numpy arrays, each of length n_trials:
@@ -194,7 +197,7 @@ class FastUnbinned:
         """
         bestfit = []
         result = []
-        for r in self.iter_toys(n_trials, batch_size, progress):
+        for r in self.iter_toys(n_trials, batch_size, guess, progress):
             mu_null = self.true_mu[0] * np.ones(r['n'])
             ll_null = self.ll(mu_null, r['p_obs'], r['present'])
             bestfit.append(r['mu_hat'])
@@ -203,7 +206,8 @@ class FastUnbinned:
         return (np.concatenate(bestfit), np.concatenate(result))
 
     def toy_intervals(self, mu_s, critical_ts=None, kind='central',
-                      n_trials=int(2e4), batch_size=400, progress=True):
+                      n_trials=int(2e4), batch_size=400, progress=True,
+                      guess=None):
         """Return n_trials (upper, lower) inclusive confidence interval bounds.
         :param mu_s: Signal hypotheses to test
         :param critical_ts: Critical values of the test statistic distribution,
@@ -222,7 +226,7 @@ class FastUnbinned:
             critical_ts = np.ones(len(mu_s)) * critical_ts
 
         intervals = [[], []]
-        for r in self.iter_toys(n_trials, batch_size, progress):
+        for r in self.iter_toys(n_trials, batch_size, guess, progress):
             # (signal hypothesis, trial index) matrix
             is_included = np.zeros((len(mu_s), r['n']), dtype=np.int)
 
