@@ -91,42 +91,31 @@ class FastUnbinned:
                       for mu in self.true_mu[1:]],
             axis=1)
 
-    @staticmethod
-    def _inner_term(ps, mus):
-        return np.sum(ps * mus[:, np.newaxis, :],
-                      axis=2)
-
-    def ll(self, mu_signal, p_obs, present):
+    def ll(self, mu_signal, p_obs, present, gradient=False):
         """Return array of log likelihoods for toys at mu_signal
 
         :param mu_signal: (trial_i,) hypothesized signal means at trial_i
         :param p_obs: (trial_i, event_i, source_i) event pdfs, see make_toys
         :param present: (trial_i, event_i) presence matrix, see make_toys
+        :param gradient: If True, instead return (ll, -gradient) tuple
+        of arrays. Second element is gradient of -2 ll with respect
+        to mu_signal.
         """
         mus = self._stack_mus(mu_signal)  # (trial_i, source_i)
 
-        return (
-                -mus.sum(axis=1)
-                + np.sum(
-                    xlogy(present,
-                          self._inner_term(p_obs, mus)),
-                    axis=1))
+        inner_term = np.sum(p_obs * mus[:, np.newaxis, :],
+                            axis=2)
 
-    def gradient(self, mu_signal, p_obs, present):
-        """Return -2 * gradient of log likelihood with respect to mu_s
+        ll = (-mus.sum(axis=1) + np.sum(
+            xlogy(present, inner_term),
+            axis=1))
+        if not gradient:
+            return ll
 
-        Parameters are as for ll
-        """
-        mus = self._stack_mus(mu_signal)
-
-        return -2 * (
-                -1
-                + np.sum(
-                    np.nan_to_num(
-                        present
-                        * p_obs[:, :, 0]
-                        / self._inner_term(p_obs, mus)),
-                    axis=1))
+        grad = -2 * (-1 + np.sum(
+            np.nan_to_num(present * p_obs[:, :, 0] / inner_term),
+            axis=1))
+        return ll, grad
 
     def optimize(self, p_obs, present, guess=None):
         """Return (best-fit signal rate mu_hat,
@@ -137,7 +126,8 @@ class FastUnbinned:
         batch_size = len(p_obs)
 
         def objective(mu_signal):
-            return - 2 * np.sum(self.ll(mu_signal, p_obs, present))
+            ll, grad = self.ll(mu_signal, p_obs, present, gradient=True)
+            return - 2 * np.sum(ll), grad
 
         if guess is None:
             # A guess very close to the bound is often bad
@@ -149,8 +139,7 @@ class FastUnbinned:
             objective,
             x0=guess,
             bounds=[(0, None)] * batch_size,
-            jac=partial(self.gradient,
-                        p_obs=p_obs, present=present))
+            jac=True)
         if not optresult.success:
             raise ValueError(
                 f"Optimization failed after {optresult.nfev} iterations! "
