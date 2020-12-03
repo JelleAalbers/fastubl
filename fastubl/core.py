@@ -1,5 +1,3 @@
-from functools import partial
-
 import matplotlib.pyplot as plt
 import numba
 import numpy as np
@@ -8,18 +6,19 @@ from scipy.optimize import minimize
 from scipy.special import xlogy
 from tqdm import tqdm
 
+from .utils import export
 
-__all__ = ['FastUnbinned']
 
-
-class FastUnbinned:
+@export
+class StatisticalProcedure:
 
     def __init__(self, true_mu, dists, labels=None):
-        """Return fast unbinned likelihood computer.
-        The first distribution is considered signal, others backgrounds.
+        """Generic statistical procedure
 
-        :param true_mu: Sequence of true expected number of events
+        :param true_mu: Sequence of true expected number of events.
+            The first is signal, any subsequent ones are backgrounds.
         :param dists: Sequence of true distributions
+            The first is signal, any subsequent ones are backgrounds.
         :param labels: Sequence of labels;
         """
         self.true_mu = true_mu
@@ -55,11 +54,22 @@ class FastUnbinned:
         plt.xlim(domain[0], domain[-1])
         plt.ylabel("d rate / dx")
 
-    def make_toys(self, n_trials=400):
+    def compute_pdfs(self, x_obs):
+        """Return p(event | source)
+           x: (trial_i, event_j) array
+           Returns: (trial_i, event_i, source_i array
+        """
+        p_obs = np.zeros(list(x_obs.shape) + [self.n_sources])
+        for i, dist in enumerate(self.dists):
+            p_obs[:, :, i] = dist.pdf(x_obs)
+        return p_obs
+
+    def make_toys(self, n_trials=400, skip_compute=False):
         """Return (p, x, present) for n_trials toy examples, where
             p: (trial_i, event_j, source_k), P(event_j from trial_i | source_k)
             x: (trial_i, event_j), Observed x-value of event_j in trial_i
             present: (trial_i, event_j), whether trial_i has an event_j
+            skip_compute: if True, return just (x, present), skipping p computation
         """
         # Total and per-source event count per trial
         n_obs_per_source = np.zeros((self.n_sources, n_trials), np.int)
@@ -77,6 +87,10 @@ class FastUnbinned:
         # Split the events over toy datasets
         x_obs, present = _split_over_trials(n_obs_per_source, x_per_source)
 
+        if skip_compute:
+            # Shortcut, if you only want simulation
+            return x_obs, present
+
         # Compute p(event | source)
         # Indexing: (trial_i, event_i, source_i)
         p_obs = np.zeros(list(x_obs.shape) + [self.n_sources])
@@ -90,6 +104,126 @@ class FastUnbinned:
             [mu_s] + [mu * np.ones_like(mu_s)
                       for mu in self.true_mu[1:]],
             axis=1)
+
+    def iter_toys(self, n_trials, batch_size,
+                  progress=True, toy_maker=None):
+        """Iterate over n_trials toy datasets in batches of size batch_size
+        Each iteration yields a dictionary with the following keys:
+          - p_obs, x_obs, present: see make_toys
+          - n, the number of toy datasets in the batch.
+
+        Kwargs:
+            - toy_maker: Function that produces toys, like make_toys
+            - progress: if True (default), show a progress bar
+        """
+        if toy_maker is None:
+            toy_maker = self.make_toys
+
+        n_batches = n_trials // batch_size + 1
+        last_batch_size = n_trials % batch_size
+
+        iter = range(n_batches)
+        if progress:
+            iter = tqdm(iter)
+
+        for batch_i in iter:
+            if batch_i == n_batches - 1 and last_batch_size != 0:
+                batch_size = last_batch_size
+
+            p_obs, x_obs, present = toy_maker(batch_size)
+
+            yield dict(p_obs=p_obs, x_obs=x_obs, present=present,
+                       n=batch_size)
+
+    def toy_intervals(self,
+                      *,
+                      kind='central',
+                      cl=0.9,
+                      n_trials=int(2e4),
+                      batch_size=400,
+                      progress=True,
+                      toy_maker=None,
+                      **kwargs):
+        """Return n_trials (upper, lower) inclusive confidence interval bounds.
+
+        :param kind: 'central' for two-sided intervals (ordered by likelihood),
+        'upper' or 'lower' for one-sided limits.
+        Other arguments are as for toy_llrs.
+        """
+        intervals = [[], []]
+        for r in self.iter_toys(n_trials, batch_size,
+                                progress=progress, toy_maker=toy_maker):
+            lower, upper = self.compute_intervals(r, kind=kind, cl=cl, **kwargs)
+            intervals[0].append(lower)
+            intervals[1].append(upper)
+        return np.concatenate(intervals[0]), np.concatenate(intervals[1])
+
+    def compute_intervals(self, r, *, kind, cl, **kwargs):
+        raise NotImplementedError
+
+
+@export
+class UnbinnedLikelihood(StatisticalProcedure):
+
+    def compute_intervals(self,
+                          r,
+                          kind='central',
+                          cl=0.9,
+                          mu_s=None,
+                          critical_ts=None,
+                          guess=None):
+        """Return n_trials (upper, lower) inclusive confidence interval bounds.
+        :param mu_s: Signal hypotheses to test
+        :param critical_ts: Critical values of the test statistic distribution,
+        array of same length as mu_s.
+        If not given, will use asymptotic 90th percentile values.
+        :param kind: 'central' for two-sided intervals (ordered by likelihood),
+        'upper' or 'lower' for one-sided limits.
+
+        Other arguments are as for toy_llrs.
+        """
+        if mu_s is None:
+            raise ValueError("Must specify grid of mu_s")
+
+        if critical_ts is None:
+            # I hope this is right... Test coverage please!!
+            if kind == 'central':
+                critical_ts = stats.chi2(1).ppf(cl)
+            else:
+                critical_ts = stats.chi2(1).ppf(2 * cl - 1)
+            critical_ts = np.ones(len(mu_s)) * critical_ts
+
+        # Find the best-fit, if we haven't already
+        if not 'mu_hat' in r:
+            self.optimize_batch(r, guess)
+
+        # (signal hypothesis, trial index) matrix
+        is_included = np.zeros((len(mu_s), r['n']), dtype=np.int)
+
+        # For each signal strength, see if it is in the interval
+        # TODO: use optimizer instead, or at least offer the option
+        # TODO: duplicate LL computations with the ones inside optimize
+        for s_i, ms in enumerate(mu_s):
+            t = -2 * (self.ll(ms * np.ones(r['n']), r['p_obs'],
+                              r['present'])
+                      - r['ll_best'])
+            if kind == 'upper':
+                t[r['mu_hat'] > ms] = 0
+            elif kind == 'lower':
+                t[r['mu_hat'] < ms] = 0
+            is_included[s_i, :] = t <= critical_ts[s_i]
+
+        # 0 is lower, 1 is upper
+        intervals = [None, None]
+        for side in (0, 1):
+            # Get a decreasing/increasing sequence for lower/upper limits
+            x = 1 + np.arange(len(mu_s), dtype=np.int)
+            if side == 0:
+                x = 2 * len(mu_s) - x
+            # Zero excluded models. Limit is at highest number.
+            x = x[:, np.newaxis] * is_included
+            intervals[side] = mu_s[np.argmax(x, axis=0)]
+        return intervals
 
     def ll(self, mu_signal, p_obs, present, gradient=False):
         """Return array of log likelihoods for toys at mu_signal
@@ -148,33 +282,13 @@ class FastUnbinned:
         mu_hat = optresult.x
         return mu_hat, self.ll(mu_hat, p_obs, present)
 
-    def iter_toys(self, n_trials, batch_size, guess=None, progress=True):
-        """Iterate over n_trials toy likelihoods in batches of size batch_size
-        Each iteration yields a dictionary with the following keys:
-          - p_obs, x_obs, present: see make_toys
-          - mu_hat, ll_best, see optimize
-          - n, the number of toy datasets in the batch.
-        """
-        n_batches = n_trials // batch_size + 1
-        last_batch_size = n_trials % batch_size
-
-        iter = range(n_batches)
-        if progress:
-            iter = tqdm(iter)
-
-        for batch_i in iter:
-            if batch_i == n_batches - 1 and last_batch_size != 0:
-                batch_size = last_batch_size
-
-            p_obs, x_obs, present = self.make_toys(batch_size)
-
-            mu_hat, ll_best = self.optimize(p_obs, present, guess=guess)
-
-            yield dict(p_obs=p_obs, x_obs=x_obs, present=present,
-                       mu_hat=mu_hat, ll_best=ll_best, n=batch_size)
+    def optimize_batch(self, result, guess=None):
+        result['mu_hat'], result['ll_best'] = \
+            self.optimize(result['p_obs'], result['present'],
+                          guess=guess)
 
     def toy_llrs(self, n_trials=int(2e4), batch_size=400,
-                 guess=None, progress=True):
+                 guess=None, progress=True, toy_maker=None):
         """Return bestfit and -2 LLR for n_trials toy MCs.
 
         Result is a 2-tuple of numpy arrays, each of length n_trials:
@@ -186,63 +300,15 @@ class FastUnbinned:
         """
         bestfit = []
         result = []
-        for r in self.iter_toys(n_trials, batch_size, guess, progress):
+        for r in self.iter_toys(
+                n_trials,  batch_size,
+                progress=progress, toy_maker=toy_maker):
+            self.optimize_batch(r, guess=guess)
             mu_null = self.true_mu[0] * np.ones(r['n'])
             ll_null = self.ll(mu_null, r['p_obs'], r['present'])
             bestfit.append(r['mu_hat'])
             result.append(-2 * (ll_null - r['ll_best']))
-
-        return (np.concatenate(bestfit), np.concatenate(result))
-
-    def toy_intervals(self, mu_s, critical_ts=None, kind='central',
-                      n_trials=int(2e4), batch_size=400, progress=True,
-                      guess=None):
-        """Return n_trials (upper, lower) inclusive confidence interval bounds.
-        :param mu_s: Signal hypotheses to test
-        :param critical_ts: Critical values of the test statistic distribution,
-        array of same length as mu_s.
-        If not given, will use asymptotic 90th percentile values.
-        :param kind: 'central' for two-sided intervals (ordered by likelihood),
-        'upper' or 'lower' for one-sided limits.
-
-        Other arguments are as for toy_llrs.
-        """
-        if critical_ts is None:
-            if kind == 'central':
-                critical_ts = stats.chi2(1).ppf(0.9)
-            else:
-                critical_ts = stats.chi2(1).ppf(0.8)
-            critical_ts = np.ones(len(mu_s)) * critical_ts
-
-        intervals = [[], []]
-        for r in self.iter_toys(n_trials, batch_size, guess, progress):
-            # (signal hypothesis, trial index) matrix
-            is_included = np.zeros((len(mu_s), r['n']), dtype=np.int)
-
-            # For each signal strength, see if it is in the interval
-            # TODO: use optimizer instead, or at least offer the option
-            # TODO: duplicate LL computations with the ones inside optimize
-            for s_i, ms in enumerate(mu_s):
-                t = -2 * (self.ll(ms * np.ones(r['n']), r['p_obs'],
-                                  r['present'])
-                          - r['ll_best'])
-                if kind == 'upper':
-                    t[r['mu_hat'] > ms] = 0
-                elif kind == 'lower':
-                    t[r['mu_hat'] < ms] = 0
-                is_included[s_i, :] = t <= critical_ts[s_i]
-
-            # 0 is lower, 1 is upper
-            for side in (0, 1):
-                # Get a decreasing/increasing sequence for lower/upper limits
-                x = 1 + np.arange(len(mu_s), dtype=np.int)
-                if side == 0:
-                    x = 2 * len(mu_s) - x
-                # Zero excluded models. Limit is at highest number.
-                x = x[:, np.newaxis] * is_included
-                intervals[side].append(mu_s[np.argmax(x, axis=0)])
-
-        return np.concatenate(intervals[0]), np.concatenate(intervals[1])
+        return np.concatenate(bestfit), np.concatenate(result)
 
 
 @numba.njit
