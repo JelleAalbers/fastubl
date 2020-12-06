@@ -266,7 +266,7 @@ class UnbinnedLikelihood(StatisticalProcedure):
         if guess is None:
             # A guess very close to the bound is often bad
             # so let's have the guess be 1 at least
-            guess = min(1, self.true_mu[0])
+            guess = max(1, self.true_mu[0])
         guess = guess * np.ones(len(p_obs))
 
         optresult = minimize(
