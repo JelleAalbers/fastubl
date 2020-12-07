@@ -1,18 +1,23 @@
 import matplotlib.pyplot as plt
+from multihist import poisson_central_interval
 import numba
 import numpy as np
 from scipy import stats
-from scipy.optimize import minimize
-from scipy.special import xlogy
 from tqdm import tqdm
 
-from .utils import export
+from .utils import exporter
+
+export, __all__ = exporter()
+__all__ += ['DEFAULT_BATCH_SIZE', 'DEFAULT_MU_S_GRID']
+
+DEFAULT_BATCH_SIZE = 400
+DEFAULT_MU_S_GRID = np.geomspace(0.1, 50, 100)
 
 
 @export
 class StatisticalProcedure:
 
-    def __init__(self, true_mu, dists, labels=None):
+    def __init__(self, true_mu, dists, labels=None, mu_s_grid=None):
         """Generic statistical procedure
 
         :param true_mu: Sequence of true expected number of events.
@@ -20,22 +25,26 @@ class StatisticalProcedure:
         :param dists: Sequence of true distributions
             The first is signal, any subsequent ones are backgrounds.
         :param labels: Sequence of labels;
+        :param mu_s_grid: array of mu hypotheses used for testing
         """
         self.true_mu = true_mu
         self.dists = dists
+        if mu_s_grid is None:
+            mu_s_grid = DEFAULT_MU_S_GRID.copy()
+        self.mu_s_grid = mu_s_grid
 
         n_bgs = len(self.dists) - 1
         if n_bgs < 0:
             raise ValueError("Provide at least a signal distribution")
 
         if labels is None:
-            self.labels = ['Signal']
+            labels = ['Signal']
             if n_bgs == 1:
-                self.labels += ['Background']
+                labels += ['Background']
             else:
-                self.labels += ['Background %d' % i
-                                for i in range(n_bgs)]
-            self.labels = tuple(self.labels)
+                labels += ['Background %d' % i
+                           for i in range(n_bgs)]
+        self.labels = tuple(labels)
 
         self.n_sources = len(self.dists)
 
@@ -64,16 +73,18 @@ class StatisticalProcedure:
             p_obs[:, :, i] = dist.pdf(x_obs)
         return p_obs
 
-    def make_toys(self, n_trials=400, skip_compute=False):
-        """Return (p, x, present) for n_trials toy examples, where
-            p: (trial_i, event_j, source_k), P(event_j from trial_i | source_k)
+    def make_toys(self, n_trials=DEFAULT_BATCH_SIZE, mu_s_true=None):
+        """Return (x, present) for n_trials toy examples, where
             x: (trial_i, event_j), Observed x-value of event_j in trial_i
             present: (trial_i, event_j), whether trial_i has an event_j
             skip_compute: if True, return just (x, present), skipping p computation
+            mus_true: Override the signal mu for the toy generation
         """
         # Total and per-source event count per trial
         n_obs_per_source = np.zeros((self.n_sources, n_trials), np.int)
         for i, mu in enumerate(self.true_mu):
+            if i == 0 and mu_s_true is not None:
+                mu = mu_s_true
             n_obs_per_source[i] = stats.poisson(mu).rvs(n_trials)
 
         # Total events to simulate (over all trials) per source
@@ -86,18 +97,17 @@ class StatisticalProcedure:
 
         # Split the events over toy datasets
         x_obs, present = _split_over_trials(n_obs_per_source, x_per_source)
+        return x_obs, present
 
-        if skip_compute:
-            # Shortcut, if you only want simulation
-            return x_obs, present
-
-        # Compute p(event | source)
-        # Indexing: (trial_i, event_i, source_i)
-        p_obs = np.zeros(list(x_obs.shape) + [self.n_sources])
+    def compute_ps(self, x):
+        """Compute P(event_j from trial_i | source_k)
+            Returns (trial_i, event_j, source_k),
+            x must have shape (n_trials, max_n_events)
+        """
+        p_obs = np.zeros(list(x.shape) + [self.n_sources])
         for i, dist in enumerate(self.dists):
-            p_obs[:, :, i] = dist.pdf(x_obs)
-
-        return p_obs, x_obs, present
+            p_obs[:, :, i] = dist.pdf(x)
+        return p_obs
 
     def _stack_mus(self, mu_s):
         return np.stack(
@@ -105,11 +115,24 @@ class StatisticalProcedure:
                       for mu in self.true_mu[1:]],
             axis=1)
 
-    def iter_toys(self, n_trials, batch_size,
+    def _wrap_toy_maker(self, toy_maker):
+        if toy_maker is None:
+            return self.make_toys
+        assert isinstance(toy_maker, StatisticalProcedure)
+        # Wrap the toy maker so it does not compute p(event|source),
+        # but only simulates
+        def wrapped(*args, **kwargs):
+            kwargs['skip_compute'] = True
+            x, present = toy_maker.make_toys(*args, **kwargs)
+            return self.compute_ps(x), x, present
+        return wrapped
+
+    def iter_toys(self, n_trials, batch_size=DEFAULT_BATCH_SIZE,
                   progress=True, toy_maker=None):
         """Iterate over n_trials toy datasets in batches of size batch_size
         Each iteration yields a dictionary with the following keys:
-          - p_obs, x_obs, present: see make_toys
+          - x_obs, present: see make_toys
+          - p_obs: see compute_ps
           - n, the number of toy datasets in the batch.
 
         Kwargs:
@@ -118,6 +141,9 @@ class StatisticalProcedure:
         """
         if toy_maker is None:
             toy_maker = self.make_toys
+        else:
+            assert isinstance(toy_maker, StatisticalProcedure)
+            toy_maker = toy_maker.make_toys
 
         n_batches = n_trials // batch_size + 1
         last_batch_size = n_trials % batch_size
@@ -130,17 +156,19 @@ class StatisticalProcedure:
             if batch_i == n_batches - 1 and last_batch_size != 0:
                 batch_size = last_batch_size
 
-            p_obs, x_obs, present = toy_maker(batch_size)
+            x_obs, present = toy_maker(batch_size)
 
-            yield dict(p_obs=p_obs, x_obs=x_obs, present=present,
+            yield dict(p_obs=self.compute_ps(x_obs),
+                       x_obs=x_obs,
+                       present=present,
                        n=batch_size)
 
     def toy_intervals(self,
                       *,
-                      kind='central',
+                      kind='upper',
                       cl=0.9,
                       n_trials=int(2e4),
-                      batch_size=400,
+                      batch_size=DEFAULT_BATCH_SIZE,
                       progress=True,
                       toy_maker=None,
                       **kwargs):
@@ -163,152 +191,22 @@ class StatisticalProcedure:
 
 
 @export
-class UnbinnedLikelihood(StatisticalProcedure):
+class DummyProcedure(StatisticalProcedure):
+    pass
 
-    def compute_intervals(self,
-                          r,
-                          kind='central',
-                          cl=0.9,
-                          mu_s=None,
-                          critical_ts=None,
-                          guess=None):
-        """Return n_trials (upper, lower) inclusive confidence interval bounds.
-        :param mu_s: Signal hypotheses to test
-        :param critical_ts: Critical values of the test statistic distribution,
-        array of same length as mu_s.
-        If not given, will use asymptotic 90th percentile values.
-        :param kind: 'central' for two-sided intervals (ordered by likelihood),
-        'upper' or 'lower' for one-sided limits.
 
-        Other arguments are as for toy_llrs.
-        """
-        if mu_s is None:
-            raise ValueError("Must specify grid of mu_s")
+@export
+class Poisson(StatisticalProcedure):
 
-        if critical_ts is None:
-            # I hope this is right... Test coverage please!!
-            if kind == 'central':
-                critical_ts = stats.chi2(1).ppf(cl)
-            else:
-                critical_ts = stats.chi2(1).ppf(2 * cl - 1)
-            critical_ts = np.ones(len(mu_s)) * critical_ts
-
-        # Find the best-fit, if we haven't already
-        if not 'mu_hat' in r:
-            self.optimize_batch(r, guess)
-
-        # (signal hypothesis, trial index) matrix
-        is_included = np.zeros((len(mu_s), r['n']), dtype=np.int)
-
-        # For each signal strength, see if it is in the interval
-        # TODO: use optimizer instead, or at least offer the option
-        # TODO: duplicate LL computations with the ones inside optimize
-        for s_i, ms in enumerate(mu_s):
-            t = -2 * (self.ll(ms * np.ones(r['n']), r['p_obs'],
-                              r['present'])
-                      - r['ll_best'])
-            if kind == 'upper':
-                t[r['mu_hat'] > ms] = 0
-            elif kind == 'lower':
-                t[r['mu_hat'] < ms] = 0
-            is_included[s_i, :] = t <= critical_ts[s_i]
-
-        # 0 is lower, 1 is upper
-        intervals = [None, None]
-        for side in (0, 1):
-            # Get a decreasing/increasing sequence for lower/upper limits
-            x = 1 + np.arange(len(mu_s), dtype=np.int)
-            if side == 0:
-                x = 2 * len(mu_s) - x
-            # Zero excluded models. Limit is at highest number.
-            x = x[:, np.newaxis] * is_included
-            intervals[side] = mu_s[np.argmax(x, axis=0)]
-        return intervals
-
-    def ll(self, mu_signal, p_obs, present, gradient=False):
-        """Return array of log likelihoods for toys at mu_signal
-
-        :param mu_signal: (trial_i,) hypothesized signal means at trial_i
-        :param p_obs: (trial_i, event_i, source_i) event pdfs, see make_toys
-        :param present: (trial_i, event_i) presence matrix, see make_toys
-        :param gradient: If True, instead return (ll, -gradient) tuple
-        of arrays. Second element is gradient of -2 ll with respect
-        to mu_signal.
-        """
-        mus = self._stack_mus(mu_signal)  # (trial_i, source_i)
-
-        inner_term = np.sum(p_obs * mus[:, np.newaxis, :],
-                            axis=2)
-
-        ll = (-mus.sum(axis=1) + np.sum(
-            xlogy(present, inner_term),
-            axis=1))
-        if not gradient:
-            return ll
-
-        grad = -2 * (-1 + np.sum(
-            np.nan_to_num(present * p_obs[:, :, 0] / inner_term),
-            axis=1))
-        return ll, grad
-
-    def optimize(self, p_obs, present, guess=None):
-        """Return (best-fit signal rate mu_hat,
-                   likelihood at mu_hat)
-        :param guess_mu: guess for signal rate
-        Other parameters are as for ll
-        """
-        batch_size = len(p_obs)
-
-        def objective(mu_signal):
-            ll, grad = self.ll(mu_signal, p_obs, present, gradient=True)
-            return - 2 * np.sum(ll), grad
-
-        if guess is None:
-            # A guess very close to the bound is often bad
-            # so let's have the guess be 1 at least
-            guess = max(1, self.true_mu[0])
-        guess = guess * np.ones(len(p_obs))
-
-        optresult = minimize(
-            objective,
-            x0=guess,
-            bounds=[(0, None)] * batch_size,
-            jac=True)
-        if not optresult.success:
-            raise ValueError(
-                f"Optimization failed after {optresult.nfev} iterations! "
-                f"Current value: {optresult.fun}; "
-                f"message: {optresult.message}")
-        mu_hat = optresult.x
-        return mu_hat, self.ll(mu_hat, p_obs, present)
-
-    def optimize_batch(self, result, guess=None):
-        result['mu_hat'], result['ll_best'] = \
-            self.optimize(result['p_obs'], result['present'],
-                          guess=guess)
-
-    def toy_llrs(self, n_trials=int(2e4), batch_size=400,
-                 guess=None, progress=True, toy_maker=None):
-        """Return bestfit and -2 LLR for n_trials toy MCs.
-
-        Result is a 2-tuple of numpy arrays, each of length n_trials:
-        (bestfit_mu, -2 * [ Log(L(bestfit) - L(mu_null) ]).
-
-        :param batch_size: Number of toy MCs to optimize at once.
-        :param mu_null: Null hypothesis to test. Default is true signal rate.
-        n_trials will be ceiled to batch size.
-        """
-        bestfit = []
-        result = []
-        for r in self.iter_toys(
-                n_trials,  batch_size,
-                progress=progress, toy_maker=toy_maker):
-            self.optimize_batch(r, guess=guess)
-            mu_null = self.true_mu[0] * np.ones(r['n'])
-            ll_null = self.ll(mu_null, r['p_obs'], r['present'])
-            bestfit.append(r['mu_hat'])
-            result.append(-2 * (ll_null - r['ll_best']))
-        return np.concatenate(bestfit), np.concatenate(result)
+    def compute_intervals(self, r, *, kind, cl, **kwargs):
+        n = r['present'].sum(axis=1)
+        mu_bg = np.sum(self.true_mu[1:])
+        if kind == 'upper':
+            return np.zeros(r['n']), stats.chi2.ppf(cl, 2 * n + 2) / 2 - mu_bg
+        elif kind == 'central':
+            return [x - mu_bg
+                    for x in poisson_central_interval(n, cl=cl)]
+        raise NotImplementedError(kind)
 
 
 @numba.njit
