@@ -1,3 +1,6 @@
+import os
+import pickle
+
 import matplotlib.pyplot as plt
 from multihist import poisson_central_interval
 import numba
@@ -12,6 +15,16 @@ __all__ += ['DEFAULT_BATCH_SIZE', 'DEFAULT_MU_S_GRID']
 
 DEFAULT_BATCH_SIZE = 400
 DEFAULT_MU_S_GRID = np.geomspace(0.1, 50, 100)
+DEFAULT_CL = 0.9
+DEFAULT_INTERVAL = 'upper'
+
+
+@export
+def poisson_ul(n, mu_bg, cl=DEFAULT_CL):
+    """Upper limit on mu_signal, from observing n events
+    where mu_bg background events were expected
+    """
+    return stats.chi2.ppf(cl, 2 * n + 2) / 2 - mu_bg
 
 
 @export
@@ -127,8 +140,11 @@ class StatisticalProcedure:
             return self.compute_ps(x), x, present
         return wrapped
 
-    def iter_toys(self, n_trials, batch_size=DEFAULT_BATCH_SIZE,
-                  progress=True, toy_maker=None):
+    def iter_toys(self, n_trials,
+                  batch_size=DEFAULT_BATCH_SIZE,
+                  mu_s_true=None,
+                  progress=True,
+                  toy_maker=None):
         """Iterate over n_trials toy datasets in batches of size batch_size
         Each iteration yields a dictionary with the following keys:
           - x_obs, present: see make_toys
@@ -136,7 +152,8 @@ class StatisticalProcedure:
           - n, the number of toy datasets in the batch.
 
         Kwargs:
-            - toy_maker: Function that produces toys, like make_toys
+            - mu_s_true: True expected signal events, passed to make_toys
+            - toy_maker: StatisticalProcedure to call make_toys for instead
             - progress: if True (default), show a progress bar
         """
         if toy_maker is None:
@@ -156,7 +173,7 @@ class StatisticalProcedure:
             if batch_i == n_batches - 1 and last_batch_size != 0:
                 batch_size = last_batch_size
 
-            x_obs, present = toy_maker(batch_size)
+            x_obs, present = toy_maker(batch_size, mu_s_true=mu_s_true)
 
             yield dict(p_obs=self.compute_ps(x_obs),
                        x_obs=x_obs,
@@ -165,28 +182,31 @@ class StatisticalProcedure:
 
     def toy_intervals(self,
                       *,
-                      kind='upper',
-                      cl=0.9,
+                      kind=DEFAULT_INTERVAL,
+                      cl=DEFAULT_CL,
                       n_trials=int(2e4),
                       batch_size=DEFAULT_BATCH_SIZE,
                       progress=True,
-                      toy_maker=None,
-                      **kwargs):
+                      mu_s_true=None,
+                      toy_maker=None):
         """Return n_trials (upper, lower) inclusive confidence interval bounds.
 
-        :param kind: 'central' for two-sided intervals (ordered by likelihood),
-        'upper' or 'lower' for one-sided limits.
-        Other arguments are as for toy_llrs.
+        :param kind: 'central' for central intervals,
+            'upper' or 'lower' for one-sided limits.
+        :param cl: Confidence level
+            Other arguments are as for iter_toys.
         """
         intervals = [[], []]
         for r in self.iter_toys(n_trials, batch_size,
-                                progress=progress, toy_maker=toy_maker):
-            lower, upper = self.compute_intervals(r, kind=kind, cl=cl, **kwargs)
+                                mu_s_true=mu_s_true,
+                                progress=progress,
+                                toy_maker=toy_maker):
+            lower, upper = self.compute_intervals(r, kind=kind, cl=cl)
             intervals[0].append(lower)
             intervals[1].append(upper)
         return np.concatenate(intervals[0]), np.concatenate(intervals[1])
 
-    def compute_intervals(self, r, *, kind, cl, **kwargs):
+    def compute_intervals(self, r, kind, cl):
         raise NotImplementedError
 
 
@@ -198,15 +218,148 @@ class DummyProcedure(StatisticalProcedure):
 @export
 class Poisson(StatisticalProcedure):
 
-    def compute_intervals(self, r, *, kind, cl, **kwargs):
+    def compute_intervals(self, r, kind=DEFAULT_INTERVAL, cl=DEFAULT_CL):
         n = r['present'].sum(axis=1)
         mu_bg = np.sum(self.true_mu[1:])
         if kind == 'upper':
-            return np.zeros(r['n']), stats.chi2.ppf(cl, 2 * n + 2) / 2 - mu_bg
+            return np.zeros(r['n']), poisson_ul(r['n'], mu_bg, cl=cl)
         elif kind == 'central':
             return [x - mu_bg
                     for x in poisson_central_interval(n, cl=cl)]
         raise NotImplementedError(kind)
+
+
+class FittingStatistic(StatisticalProcedure):
+    """A statistic that is:
+      - A function of mu_s (as well as the data);
+      - zero at a "best-fit" mu_s;
+      - higher otherwise
+
+    Negative log likelihood ratios behave like this.
+    """
+
+    def statistic(self, r, mu_null=None):
+        """Return statistic evaluated at mu_null.
+        """
+        raise NotImplementedError
+
+    def critical_quantile(self, cl=DEFAULT_CL, kind=DEFAULT_INTERVAL):
+        raise NotImplementedError
+
+    def compute_intervals(self, r, cl=DEFAULT_CL, kind=DEFAULT_INTERVAL):
+        critical_ts = self.critical_quantile(cl=cl, kind=kind)
+
+        # Compute statistic on data, for each possible mu_s
+        # TODO: this is some overkill, perhaps
+        # Maybe use optimizer instead, or at least offer the option..
+        n_trials = r['x'].shape[0]
+        n_mus = self.mu_s_grid.size
+        ts = np.zeros(n_mus, n_trials)
+        bestfits = np.zeros(n_mus, n_trials)
+        for i, mu in enumerate(self.mu_s_grid):
+            ts[i, :], bestfits[i, :] = self.statistic(r, mu)
+        ts = self.zero_excessive_bestfits(ts, bestfits)
+
+        # For each signal strength, see if it is in the interval
+        is_included = ts > critical_ts[:, np.newaxis]
+
+        intervals = [None, None]
+        for side in [0, 1]:
+            # Get a decreasing/increasing sequence for lower/upper limits
+            x = 1 + np.arange(n_mus, dtype=np.int)
+            if side == 0:
+                x = 2 * len(self.mu_s_grid) - x
+            # Zero excluded models, limit is at highest remaining number.
+            x = x[:, np.newaxis] * is_included
+            intervals[side] = self.mu_s_grid[np.argmax(x, axis=0)]
+
+        return intervals
+
+    def zero_excessive_bestfits(self, ts, mu_hat, kind=DEFAULT_INTERVAL):
+        """Return ts with bestfits above/below the null hypothesis zeroed out
+        for upper/lower limits.
+
+        :param x: (mu_s, trial_i) array of statistic results
+        :param kind: upper, lower, or central
+        :return:
+        """
+        assert ts.shape[0] == self.mu_s_grid.size
+        assert ts.shape == mu_hat.shape
+        if kind == 'central':
+            return ts
+        assert kind in ('upper', 'lower')
+        # For upper limits, bestfits > the true signal should be zeroed
+        mask = ts > self.mu_s_grid[:, np.newaxis]
+        if kind == 'lower':
+            mask = True ^ mask
+        return np.where(mask, 1, ts)
+
+    def toy_statistics(
+            self,
+            n_trials=int(2e4),
+            batch_size=DEFAULT_BATCH_SIZE,
+            mu_s_true=None,
+            mu_null=None,
+            progress=True,
+            toy_maker=None):
+        """Return (test statistic, dict with arrays of bonus info) for n_trials toy MCs.
+        :param batch_size: Number of toy MCs to optimize at once.
+        :param mu_s_true: True signal rate.
+        :param mu_null: Null hypothesis to test. Default is true signal rate.
+        n_trials will be ceiled to batch size.
+        """
+        if mu_null is None:
+            mu_null = self.true_mus[0]
+
+        result = []
+        bestfits = []
+        for r in self.iter_toys(
+                n_trials,
+                batch_size,
+                mu_s_true=mu_s_true,
+                progress=progress,
+                toy_maker=toy_maker):
+
+            r = self.statistic(r, mu_null=mu_null)
+            bestfits.append(r['mu_hat'])
+            result.append(r)
+
+        result = np.concatenate(result)
+        bestfits = np.concatenate(bestfits)
+        return result, bestfits
+
+
+class NeymanConstruction(StatisticalProcedure):
+
+    mc_results : np.ndarray   # (mu_s, trial i)
+    mc_bestfits : np.ndarray  # (mu_s, trial i)
+
+    def statistic(self, r, mu_null):
+        raise NotImplementedError
+
+    def __init__(self, *args, filename=None, trials_per_s=int(1000), **kwargs):
+        super().__init__(*args, **kwargs)
+
+        if filename is not None and os.path.exists(filename):
+            with open(filename, mode='rb') as f:
+                self.mc_results = pickle.load(f)
+        else:
+            self.mc_results = np.zeros(self.mu_s_grid.size, trials_per_s)
+            self.mc_bestfits = np.zeros_like(self.mc_results)
+            for i, mu_s in enumerate(tqdm(self.mu_s_grid)):
+                self.mc_results[i], self.mc_bestfits = \
+                    self.toy_statistics(trials_per_s,
+                                        mu_null=mu_s)
+
+        if filename is not None and not os.path.exists(filename):
+            with open(filename, mode='wb') as f:
+                pickle.dump(self.mc_results, f)
+
+    def critical_quantile(self, cl, kind='upper'):
+        """Return len(self.mu_s_grid) array of critical test statistic values"""
+        mc_results = self.zero_excessive_bestfits(
+            self.mc_results, self.mc_bestfits, kind=kind)
+        return np.percentile(mc_results, cl * 100, axis=1)
 
 
 @numba.njit
