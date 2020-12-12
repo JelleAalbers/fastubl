@@ -13,14 +13,16 @@ class UnbinnedLikelihoodBase:
     def statistic(self, r, mu_null=None):
         if mu_null is None:
             mu_null = self.true_mu[0]
-        mu_null = mu_null * np.ones(r['n'])
+        mu_null = mu_null * np.ones(r['n_trials'])
         ll_null = self.ll(mu_null, r['p_obs'], r['present'])
 
-        if not 'mu_hat' in r:
-            # Find best-fit mu
-            r['mu_hat'], r['ll_best'] = self.optimize(r['p_obs'], r['present'])
+        if not 'mu_best' in r:
+            r['mu_best'], r['ll_best'] = \
+                self.optimize(r['p_obs'],
+                              r['present'],
+                              guess=np.clip(mu_null, 1, None))
 
-        return -2 * (ll_null - r['ll_best'])
+        return -2 * (ll_null - r['ll_best']), r['mu_best']
 
     def ll(self, mu_signal, p_obs, present, gradient=False):
         """Return array of log likelihoods for toys at mu_signal
@@ -38,6 +40,10 @@ class UnbinnedLikelihoodBase:
         inner_term = np.sum(p_obs * mus[:, np.newaxis, :],
                             axis=2)  # -> (trial_i, event_i)
 
+        # This avoids floating-point warnings/errors
+        # inner_term must always be multiplied by present!
+        inner_term[~present] = 1
+
         ll = (-mus.sum(axis=1) + np.sum(
             special.xlogy(present, inner_term),
             axis=1))
@@ -45,13 +51,17 @@ class UnbinnedLikelihoodBase:
             return ll
 
         grad = (-1 + np.sum(
-            np.nan_to_num(present * p_obs[:, :, 0] / inner_term),
+            present * p_obs[:, :, 0] / inner_term,
             axis=1))
+        if np.any(np.isnan(ll)) or np.any(np.isnan(grad)):
+            raise RuntimeError("Bad stuff happening")
+        if not np.all(np.isfinite(ll)) and np.all(np.isfinite(grad)):
+            raise RuntimeError("Also bad stuff happening")
         return ll, grad
 
     def optimize(self, p_obs, present, guess=None):
-        """Return (best-fit signal rate mu_hat,
-                   likelihood at mu_hat)
+        """Return (best-fit signal rate mu_best,
+                   likelihood at mu_best)
         :param guess: guess for signal rate
         Other parameters are as for ll
         """
@@ -69,39 +79,38 @@ class UnbinnedLikelihoodBase:
 
         minimize_opts = dict(
             x0=guess,
-            bounds=[(0, None)] * batch_size,
-            method='TNC')
-        optresult = optimize.minimize(objective, **minimize_opts, jac=True)
+            jac=True,
+            bounds=[(self.mu_s_grid[0], self.mu_s_grid[-1])] * batch_size,)
 
-        if not optresult.success:
-            # TODO: Still needed? Remove if not used after several tries.
-            print("Optimization failure, retrying with finite diff gradients")
+        # Optimizers fail sometimes...
+        for method in ('TNC', 'L-BFGS-B', 'Powell'):
+            optresult = optimize.minimize(objective, **minimize_opts,
+                                          method=method)
+            if optresult.success:
+                break
+        else:
+            raise ValueError(
+                f"Optimization failed after {optresult.nfev} iterations! "
+                f"Current value: {optresult.fun}; "
+                f"message: {optresult.message}")
 
-            def objective(mu_signal):
-                return -2 * self.ll(mu_signal, p_obs, present, gradient=False)
-            optresult = optimize.minimize(objective, **minimize_opts)
-
-            if not optresult.success:
-                raise ValueError(
-                    f"Optimization failed after {optresult.nfev} iterations! "
-                    f"Current value: {optresult.fun}; "
-                    f"message: {optresult.message}")
-
-        mu_hat = optresult.x
-        return mu_hat, self.ll(mu_hat, p_obs, present)
+        mu_best = optresult.x
+        return mu_best, self.ll(mu_best, p_obs, present)
 
 
-class UnbinnedLikelihoodExact(fastubl.NeymanConstruction,
-                              UnbinnedLikelihoodBase):
+@export
+class UnbinnedLikelihoodExact(UnbinnedLikelihoodBase,
+                              fastubl.NeymanConstruction):
     pass
 
 
-class UnbinnedLikelihoodWilks(fastubl.FittingStatistic,
-                              UnbinnedLikelihoodBase):
+@export
+class UnbinnedLikelihoodWilks(UnbinnedLikelihoodBase,
+                              fastubl.FittingStatistic):
 
     def critical_quantile(self,
                           cl=fastubl.DEFAULT_CL,
-                          kind=fastubl.DEFAULT_INTERVAL):
+                          kind=fastubl.DEFAULT_KIND):
         if kind == 'central':
             critical_ts = stats.chi2(1).ppf(cl)
         else:

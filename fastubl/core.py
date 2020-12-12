@@ -11,12 +11,15 @@ from tqdm import tqdm
 from .utils import exporter
 
 export, __all__ = exporter()
-__all__ += ['DEFAULT_BATCH_SIZE', 'DEFAULT_MU_S_GRID']
+__all__ += ['DEFAULT_BATCH_SIZE',
+            'DEFAULT_MU_S_GRID',
+            'DEFAULT_CL',
+            'DEFAULT_KIND']
 
 DEFAULT_BATCH_SIZE = 400
 DEFAULT_MU_S_GRID = np.geomspace(0.1, 50, 100)
 DEFAULT_CL = 0.9
-DEFAULT_INTERVAL = 'upper'
+DEFAULT_KIND = 'upper'
 
 
 @export
@@ -61,7 +64,9 @@ class StatisticalProcedure:
 
         self.n_sources = len(self.dists)
 
-    def show_pdfs(self, domain):
+    def show_pdfs(self, domain=None):
+        if domain is None:
+            domain = np.linspace(-0.05, 1.05, 1000)
         x = domain
         ysum = 0
         for i, dist in enumerate(self.dists):
@@ -178,11 +183,11 @@ class StatisticalProcedure:
             yield dict(p_obs=self.compute_ps(x_obs),
                        x_obs=x_obs,
                        present=present,
-                       n=batch_size)
+                       n_trials=batch_size)
 
     def toy_intervals(self,
                       *,
-                      kind=DEFAULT_INTERVAL,
+                      kind=DEFAULT_KIND,
                       cl=DEFAULT_CL,
                       n_trials=int(2e4),
                       batch_size=DEFAULT_BATCH_SIZE,
@@ -218,17 +223,18 @@ class DummyProcedure(StatisticalProcedure):
 @export
 class Poisson(StatisticalProcedure):
 
-    def compute_intervals(self, r, kind=DEFAULT_INTERVAL, cl=DEFAULT_CL):
+    def compute_intervals(self, r, kind=DEFAULT_KIND, cl=DEFAULT_CL):
         n = r['present'].sum(axis=1)
         mu_bg = np.sum(self.true_mu[1:])
         if kind == 'upper':
-            return np.zeros(r['n']), poisson_ul(r['n'], mu_bg, cl=cl)
+            return np.zeros(r['n_trials']), poisson_ul(n, mu_bg, cl=cl)
         elif kind == 'central':
             return [x - mu_bg
                     for x in poisson_central_interval(n, cl=cl)]
         raise NotImplementedError(kind)
 
 
+@export
 class FittingStatistic(StatisticalProcedure):
     """A statistic that is:
       - A function of mu_s (as well as the data);
@@ -239,29 +245,27 @@ class FittingStatistic(StatisticalProcedure):
     """
 
     def statistic(self, r, mu_null=None):
-        """Return statistic evaluated at mu_null.
+        """Return (statistic evaluated at mu_null, bestfit mu)
         """
         raise NotImplementedError
 
-    def critical_quantile(self, cl=DEFAULT_CL, kind=DEFAULT_INTERVAL):
+    def critical_quantile(self, cl=DEFAULT_CL, kind=DEFAULT_KIND):
         raise NotImplementedError
 
-    def compute_intervals(self, r, cl=DEFAULT_CL, kind=DEFAULT_INTERVAL):
+    def compute_intervals(self, r, cl=DEFAULT_CL, kind=DEFAULT_KIND):
         critical_ts = self.critical_quantile(cl=cl, kind=kind)
 
         # Compute statistic on data, for each possible mu_s
         # TODO: this is some overkill, perhaps
         # Maybe use optimizer instead, or at least offer the option..
-        n_trials = r['x'].shape[0]
         n_mus = self.mu_s_grid.size
-        ts = np.zeros(n_mus, n_trials)
-        bestfits = np.zeros(n_mus, n_trials)
+        ts = np.zeros((n_mus, r['n_trials']))
         for i, mu in enumerate(self.mu_s_grid):
-            ts[i, :], bestfits[i, :] = self.statistic(r, mu)
-        ts = self.zero_excessive_bestfits(ts, bestfits)
+            ts[i, :], _ = self.statistic(r, mu)
+        ts = self.zero_excessive_bestfits(ts, r['mu_best'])
 
         # For each signal strength, see if it is in the interval
-        is_included = ts > critical_ts[:, np.newaxis]
+        is_included = ts <= critical_ts[:, np.newaxis]
 
         intervals = [None, None]
         for side in [0, 1]:
@@ -275,24 +279,37 @@ class FittingStatistic(StatisticalProcedure):
 
         return intervals
 
-    def zero_excessive_bestfits(self, ts, mu_hat, kind=DEFAULT_INTERVAL):
+    def zero_excessive_bestfits(self, ts, mu_best, kind=DEFAULT_KIND):
         """Return ts with bestfits above/below the null hypothesis zeroed out
         for upper/lower limits.
 
-        :param x: (mu_s, trial_i) array of statistic results
+        :param ts: array of test statistic results
+        :param mu_best: array of best fits
         :param kind: upper, lower, or central
-        :return:
+
+        Either:
+            (a) ts.shape === mus_best.shape == (n_mu, n_trials)
+                matrices of toy MC results, evaluated at the true mu
+            (b) ts.shape == (n_mu, n_trials), mus_best.shape == (n_trials)
+                results of one trial batch evaluted at all mu
         """
-        assert ts.shape[0] == self.mu_s_grid.size
-        assert ts.shape == mu_hat.shape
         if kind == 'central':
             return ts
         assert kind in ('upper', 'lower')
+
+        assert ts.shape[0] == self.mu_s_grid.size  # n_mus
+
+        if len(mu_best.shape) == 1:
+            # ts represent one batch evaluated at all mus,
+            # and of course there is just one mu_best per trial
+            mu_best = mu_best[np.newaxis, :]
+        assert ts.shape[1] == mu_best.shape[1]    # n_trials
+
         # For upper limits, bestfits > the true signal should be zeroed
-        mask = ts > self.mu_s_grid[:, np.newaxis]
+        mask = mu_best > self.mu_s_grid[:, np.newaxis]
         if kind == 'lower':
             mask = True ^ mask
-        return np.where(mask, 1, ts)
+        return np.where(mask, 0, ts)
 
     def toy_statistics(
             self,
@@ -308,8 +325,10 @@ class FittingStatistic(StatisticalProcedure):
         :param mu_null: Null hypothesis to test. Default is true signal rate.
         n_trials will be ceiled to batch size.
         """
+        if mu_s_true is None:
+            mu_s_true = self.true_mus[0]
         if mu_null is None:
-            mu_null = self.true_mus[0]
+            mu_null = mu_s_true
 
         result = []
         bestfits = []
@@ -320,21 +339,24 @@ class FittingStatistic(StatisticalProcedure):
                 progress=progress,
                 toy_maker=toy_maker):
 
-            r = self.statistic(r, mu_null=mu_null)
-            bestfits.append(r['mu_hat'])
-            result.append(r)
+            t, bf = self.statistic(r, mu_null=mu_null)
+            bestfits.append(bf)
+            result.append(t)
 
         result = np.concatenate(result)
         bestfits = np.concatenate(bestfits)
         return result, bestfits
 
 
-class NeymanConstruction(StatisticalProcedure):
+@export
+class NeymanConstruction(FittingStatistic):
 
     mc_results : np.ndarray   # (mu_s, trial i)
     mc_bestfits : np.ndarray  # (mu_s, trial i)
 
-    def statistic(self, r, mu_null):
+    def statistic(self, r, mu_null=None):
+        """Return (statistic evaluated at mu_null, bestfit mu)
+        """
         raise NotImplementedError
 
     def __init__(self, *args, filename=None, trials_per_s=int(1000), **kwargs):
@@ -344,19 +366,23 @@ class NeymanConstruction(StatisticalProcedure):
             with open(filename, mode='rb') as f:
                 self.mc_results = pickle.load(f)
         else:
-            self.mc_results = np.zeros(self.mu_s_grid.size, trials_per_s)
+            self.mc_results = np.zeros((self.mu_s_grid.size, trials_per_s))
             self.mc_bestfits = np.zeros_like(self.mc_results)
-            for i, mu_s in enumerate(tqdm(self.mu_s_grid)):
-                self.mc_results[i], self.mc_bestfits = \
+            for i, mu_s in enumerate(tqdm(self.mu_s_grid,
+                                          desc='MC for Neyman construction')):
+                self.mc_results[i], self.mc_bestfits[i] = \
                     self.toy_statistics(trials_per_s,
-                                        mu_null=mu_s)
+                                        mu_s_true=mu_s,
+                                        mu_null=mu_s,
+                                        progress=False)
 
         if filename is not None and not os.path.exists(filename):
             with open(filename, mode='wb') as f:
                 pickle.dump(self.mc_results, f)
 
-    def critical_quantile(self, cl, kind='upper'):
+    def critical_quantile(self, cl=DEFAULT_CL, kind=DEFAULT_KIND):
         """Return len(self.mu_s_grid) array of critical test statistic values"""
+
         mc_results = self.zero_excessive_bestfits(
             self.mc_results, self.mc_bestfits, kind=kind)
         return np.percentile(mc_results, cl * 100, axis=1)
