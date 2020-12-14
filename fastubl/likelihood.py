@@ -22,7 +22,13 @@ class UnbinnedLikelihoodBase:
                               r['present'],
                               guess=np.clip(mu_null, 1, None))
 
-        return -2 * (ll_null - r['ll_best']), r['mu_best']
+        lr = - 2 * (ll_null - r['ll_best'])
+
+        # 'Sign' the likelihood ratio so deficits (mu_best < mu_null)
+        # give negative ts, and we can use the usual percentile-based
+        # interval setting code
+        lr *= np.sign(r['mu_best'] - mu_null)
+        return lr
 
     def ll(self, mu_signal, p_obs, present, gradient=False):
         """Return array of log likelihoods for toys at mu_signal
@@ -106,14 +112,16 @@ class UnbinnedLikelihoodExact(UnbinnedLikelihoodBase,
 
 @export
 class UnbinnedLikelihoodWilks(UnbinnedLikelihoodBase,
-                              fastubl.FittingStatistic):
+                              fastubl.RegularProcedure):
 
-    def critical_quantile(self,
-                          cl=fastubl.DEFAULT_CL,
-                          kind=fastubl.DEFAULT_KIND):
-        if kind == 'central':
+    def t_percentile(self,
+                     cl=fastubl.DEFAULT_CL,
+                     abs=False):
+        if abs:
+            # For unsigned LR
             critical_ts = stats.chi2(1).ppf(cl)
         else:
-            critical_ts = stats.chi2(1).ppf(2 * cl - 1)
+            # Signed LR
+            # TODO: justify in a comment here
+            critical_ts = stats.norm.ppf(cl)**2 * np.sign(cl - 0.5)
         return np.ones(len(self.mu_s_grid)) * critical_ts
-
