@@ -1,14 +1,13 @@
 import numpy as np
-from .utils import exporter
-from .core import StatisticalProcedure
+from scipy import optimize, interpolate, special, stats
+import fastubl
 
-from scipy import optimize, interpolate, special
 
-export, __all__ = exporter()
+export, __all__ = fastubl.utils.exporter()
 
 
 @export
-class MaxGap(StatisticalProcedure):
+class MaxGap(fastubl.StatisticalProcedure):
 
     _limit_loglog_curves = None
 
@@ -20,7 +19,8 @@ class MaxGap(StatisticalProcedure):
         g, _ = self.max_gap(r)
 
         if kind == 'upper':
-            return np.zeros(r['n']), 10 ** self.limit_loglog_curve(cl)(np.log10(g))
+            return (np.zeros(r['n_trials']),
+                    10 ** self.limit_loglog_curve(cl)(np.log10(g)))
         else:
             raise NotImplementedError(kind)
 
@@ -28,14 +28,10 @@ class MaxGap(StatisticalProcedure):
         """Return (gap sizes, skip_events) of maximum gap
         indices are in sorted version of r['x'], with non-present events removed
         """
-        if r['x_obs'].size == 0:
-            # No trials have events!
-            return np.ones(r['n']), np.zeros(r['n'])
-        # Find the largest gap in each trial
-        # Non-present events are set to 1,
-        # so they influence neither max gap size nor the skip_events
-        x = np.where(r['present'], r['x_obs'], np.ones(r['x_obs'].shape))
-        sizes, skips = k_largest(x, self.dists[0].cdf, max_n=0)
+        xn = fastubl.yellin_normalize(r['x_obs'],
+                                    r['present'],
+                                    cdf=self.dists[0].cdf)
+        sizes, skips = fastubl.k_largest(xn, max_n=0)
         return sizes[..., 0], skips[..., 0]
 
     def limit_loglog_curve(self, cl):
@@ -82,53 +78,29 @@ class MaxGap(StatisticalProcedure):
                     for k in range(m + 1)])
 
 
-def k_largest(x, cdf=lambda x: x, max_n=None):
-    """Return (sizes, skip_events) of largest intervals with different event count
+@export
+class PMax(fastubl.NeymanConstruction):
 
-    Here size is the expected number of events inside the interval,
-    and skip_events is the number of observed events left of the start of the interval.
-    The index in sizes/skip_events denotes the event count in the interval.
+    def statistic(self, r, mu_null=None):
+        # NB: using -log(pmax)
 
-    For example, sizes[0] gives the expected number of events in the largest observed gap.
+        if 'sizes' not in r:
+            xn = fastubl.yellin_normalize(r['x_obs'],
+                                          r['present'],
+                                          cdf=self.dists[0].cdf)
+            # These are (trial_i, events_in_interval_j) matrices
+            r['sizes'], r['skips'] = fastubl.k_largest(xn)
 
-    :param x: Input data. The last axis must be the data dimension, earlier axes can run over trials.
-    :param cdf: Expected CDF, default is standard uniform
-    :param max_n: Maximum event count to consider. Defaults to len(x)
-    """
-    if len(x.shape) > 1:
-        other_dims = list(x.shape[:-1])
-    else:
-        other_dims = []
+        if mu_null is None:
+            # TODO: ugly to repeat every time
+            mu_null = self.true_mu[0]
 
-    x = np.asarray(x)
-    if max_n is None:
-        max_n = x.shape[-1]
-    x = np.sort(x, axis=-1)
-    if cdf is not None:
-        x = cdf(x)
-    x = add_bounds(x)
+        # P(more events in random interval of size):
+        p_more_events = stats.poisson(mu_null * r['sizes']).sf(
+            np.arange(r['sizes'].shape[1])[np.newaxis,:])
+        pmax = p_more_events.max(axis=1)
 
-    # Default values (size 1, start 0) apply to i > n - 1
-    sizes = np.ones(other_dims + [max_n + 1])
-    starts = np.zeros(other_dims + [max_n + 1], dtype=np.int)
-
-    for i in range(sizes.shape[-1]):
-        # Compute sizes of gaps with i events in them
-        y = x[..., (i + 1):] - x[..., :-(i + 1)]
-        starts[..., i] = np.argmax(y, axis=-1)
-        sizes[..., i] = np.max(y, axis=-1)
-
-    assert sizes.min() > 0, "Encountered edge case"
-
-    return sizes, starts
-
-
-def add_bounds(x):
-    """pad data along final axis by 0 and 1"""
-    x = np.asarray(x)
-    for q in [0, 1]:
-        x = np.pad(
-            x,
-            [(0, 0)] * (len(x.shape) - 1) + [(1 - q, q)],
-            mode='constant', constant_values=q)
-    return x
+        # Excesses give low pmax, so we need to invert (or sign-flip)
+        # to use the regular interval setting code.
+        # Logging seems nice anyway
+        return -np.log(np.maximum(pmax, 1.e-9))
