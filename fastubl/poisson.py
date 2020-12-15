@@ -7,9 +7,12 @@ export, __all__ = fastubl.exporter()
 
 
 @export
-def poisson_ul(n, mu_bg, cl=fastubl.DEFAULT_CL):
+def poisson_ul(n, mu_bg=0, cl=fastubl.DEFAULT_CL):
     """Upper limit on mu_signal, from observing n events
     where mu_bg background events were expected
+
+    NB: can be negative if mu_bg large enough.
+    It's your responsibility to clip to 0...
     """
     return stats.chi2.ppf(cl, 2 * n + 2) / 2 - mu_bg
 
@@ -39,22 +42,26 @@ class OptimalCutPoisson(fastubl.StatisticalProcedure):
     fraction_in_interval: np.ndarray
 
     def __init__(self, *args,
-                 optimize_interval_for_cl=fastubl.DEFAULT_CL,
+                 optimize_for_cl=fastubl.DEFAULT_CL,
                  interval_guess=(0.1, 1.),
                  **kwargs):
         super().__init__(*args, **kwargs)
 
-        # Find the best interval
-        optresult = optimize.minimize(
-            self.mean_sensitivity,
-            interval_guess,
-            args=(0, optimize_interval_for_cl))
-        if not optresult.success:
-            print(
-                f"Optimization failed after {optresult.nfev} iterations! "
-                f"Current value: {optresult.fun}; "
-                f"message: {optresult.message}")
-        self.interval = optresult.x
+        if np.sum(self.true_mu[1:]) == 0:
+            # No background: include all events
+            self.interval = np.array([-float('inf'), float('inf')])
+        else:
+            # Find interval maximizing mean exclusion limit
+            optresult = optimize.minimize(
+                self.mean_sensitivity,
+                interval_guess,
+                args=(0, optimize_for_cl))
+            if not optresult.success:
+                print(
+                    f"Optimization failed after {optresult.nfev} iterations! "
+                    f"Current value: {optresult.fun}; "
+                    f"message: {optresult.message}.\n")
+            self.interval = optresult.x
         self.fraction_in_interval = self.compute_fraction_in_interval(
             self.interval)
 
