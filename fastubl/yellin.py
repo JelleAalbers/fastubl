@@ -81,7 +81,7 @@ class MaxGap(fastubl.StatisticalProcedure):
 @export
 class PMax(fastubl.NeymanConstruction):
 
-    def statistic(self, r, mu_null=None):
+    def statistic(self, r, mu_null):
         # NB: using -log(pmax)
 
         if 'sizes' not in r:
@@ -90,10 +90,6 @@ class PMax(fastubl.NeymanConstruction):
                                           cdf=self.dists[0].cdf)
             # These are (trial_i, events_in_interval_j) matrices
             r['sizes'], r['skips'] = fastubl.k_largest(xn)
-
-        if mu_null is None:
-            # TODO: ugly to repeat every time
-            mu_null = self.true_mu[0]
 
         # P(more events in random interval of size):
         p_more_events = stats.poisson(mu_null * r['sizes']).sf(

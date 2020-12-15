@@ -141,6 +141,7 @@ class StatisticalProcedure:
                   batch_size=DEFAULT_BATCH_SIZE,
                   mu_s_true=None,
                   progress=True,
+                  desc=None,
                   toy_maker=None):
         """Iterate over n_trials toy datasets in batches of size batch_size
         Each iteration yields a dictionary with the following keys:
@@ -164,7 +165,7 @@ class StatisticalProcedure:
 
         iter = range(n_batches)
         if progress:
-            iter = tqdm(iter)
+            iter = tqdm(iter, desc=desc)
 
         for batch_i in iter:
             if batch_i == n_batches - 1 and last_batch_size != 0:
@@ -184,6 +185,7 @@ class StatisticalProcedure:
                       n_trials=int(2e4),
                       batch_size=DEFAULT_BATCH_SIZE,
                       progress=True,
+                      desc=None,
                       mu_s_true=None,
                       toy_maker=None):
         """Return n_trials (upper, lower) inclusive confidence interval bounds.
@@ -197,6 +199,7 @@ class StatisticalProcedure:
         for r in self.iter_toys(n_trials, batch_size,
                                 mu_s_true=mu_s_true,
                                 progress=progress,
+                                desc=desc,
                                 toy_maker=toy_maker):
             lower, upper = self.compute_intervals(r, kind=kind, cl=cl)
             intervals[0].append(lower)
@@ -222,7 +225,7 @@ class RegularProcedure(StatisticalProcedure):
     E.g. count, 1/gap, signed LLR
     """
 
-    def statistic(self, r, mu_null=None):
+    def statistic(self, r, mu_null):
         """Return statistic evaluated at mu_null
         """
         raise NotImplementedError
@@ -313,7 +316,7 @@ class NeymanConstruction(RegularProcedure):
 
     mc_results : np.ndarray   # (mu_s, trial i)
 
-    def statistic(self, r, mu_null=None):
+    def statistic(self, r, mu_null):
         """Return statistic evaluated at mu_null
         """
         raise NotImplementedError

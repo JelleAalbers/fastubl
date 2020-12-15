@@ -10,9 +10,7 @@ export, __all__ = fastubl.exporter()
 @export
 class UnbinnedLikelihoodBase:
 
-    def statistic(self, r, mu_null=None):
-        if mu_null is None:
-            mu_null = self.true_mu[0]
+    def statistic(self, r, mu_null):
         mu_null = mu_null * np.ones(r['n_trials'])
         ll_null = self.ll(mu_null, r['p_obs'], r['present'])
 
