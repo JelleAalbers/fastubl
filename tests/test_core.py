@@ -1,43 +1,37 @@
 import numpy as np
+import pytest
 from scipy import stats
 
-from fastubl import *
+import fastubl
+
+# Run tests over all statistical procedures
+# (Omitted Neyman-construction ones for now, take time..)
+@pytest.fixture(params=(
+        "Poisson",
+        "OptimalCutPoisson",
+        "UnbinnedLikelihoodWilks",
+        "MaxGap",
+))
+def proc(request):
+    slope = 0.2
+    dist = stats.truncexpon(scale=slope, b=1 / slope)
+
+    return getattr(fastubl, request.param)(
+        true_mu=[0, 5],
+        dists=[stats.uniform(), dist])
 
 
-def test_basics():
-    max_bg_sigma = 5
+def test_basics(proc):
+    # Toy data generation
+    x, present = proc.make_toys(n_trials=10)
+    assert x.shape == present.shape
+    assert x.shape[0] == 10
+    assert present.dtype == np.bool_
 
-    fu = FastUnbinned(
-        true_mu=[5, 10],
-        dists=[stats.norm(),
-               stats.uniform(loc=-max_bg_sigma,
-                             scale=2 * max_bg_sigma)])
-
-    n_toys = 1000
-    (bf, result) = fu.toy_llrs(n_trials=n_toys)
-
-    # Length matches
-    assert len(bf) == n_toys
-    assert len(result) == n_toys
-
-    # No Nans
-    assert np.sum(np.isnan(bf)) == 0
-    assert np.sum(np.isnan(result)) == 0
-
-    # Best fits >= 0
-    assert np.all(bf >= 0)
-
-
-    signal_hyps = np.arange(10)
-    lower, upper = fu.toy_intervals(signal_hyps, n_trials=n_toys)
-
-    # Length matches
-    assert len(lower) == n_toys
-    assert len(upper) == n_toys
-
-    # Only signal hypotheses in intervals
-    assert np.all(np.in1d(lower, signal_hyps))
-    assert np.all(np.in1d(upper, signal_hyps))
-
-    # Lower limits never above upper limits
-    assert np.all(lower <= upper)
+    # Toy interval generation
+    lower, upper = proc.toy_intervals(n_trials=10,
+                                      kind='upper',
+                                      cl=0.9,
+                                      progress=False)
+    assert lower.shape == upper.shape == (10,)
+    assert np.all(lower == 0)

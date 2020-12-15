@@ -290,6 +290,14 @@ class RegularProcedure(StatisticalProcedure):
             x = x[:, np.newaxis] * is_included
             intervals[side] = self.mu_s_grid[np.argmax(x, axis=0)]
 
+        # By default, we'd get the lowest/highest mu in the grid for non-central
+        # intervals. Better to go all the way:
+        # TODO: what about extreme results in central intervals?
+        if kind == 'upper':
+            intervals[0] *= 0
+        elif kind == 'central':
+            intervals[1] += float('inf')
+
         return intervals
 
     def toy_statistics(
