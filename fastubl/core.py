@@ -2,7 +2,7 @@ import os
 import pickle
 
 import matplotlib.pyplot as plt
-from multihist import poisson_central_interval
+
 import numba
 import numpy as np
 from scipy import stats
@@ -20,14 +20,6 @@ DEFAULT_BATCH_SIZE = 400
 DEFAULT_MU_S_GRID = np.geomspace(0.1, 50, 100)
 DEFAULT_CL = 0.9
 DEFAULT_KIND = 'upper'
-
-
-@export
-def poisson_ul(n, mu_bg, cl=DEFAULT_CL):
-    """Upper limit on mu_signal, from observing n events
-    where mu_bg background events were expected
-    """
-    return stats.chi2.ppf(cl, 2 * n + 2) / 2 - mu_bg
 
 
 @export
@@ -218,20 +210,6 @@ class StatisticalProcedure:
 @export
 class DummyProcedure(StatisticalProcedure):
     pass
-
-
-@export
-class Poisson(StatisticalProcedure):
-
-    def compute_intervals(self, r, kind=DEFAULT_KIND, cl=DEFAULT_CL):
-        n = r['present'].sum(axis=1)
-        mu_bg = np.sum(self.true_mu[1:])
-        if kind == 'upper':
-            return np.zeros(r['n_trials']), poisson_ul(n, mu_bg, cl=cl)
-        elif kind == 'central':
-            return [x - mu_bg
-                    for x in poisson_central_interval(n, cl=cl)]
-        raise NotImplementedError(kind)
 
 
 @export
