@@ -7,21 +7,27 @@ export, __all__ = fastubl.exporter()
 
 
 @export
-class PMaxBG(fastubl.NeymanConstruction):
-    """Selects interval with largest background underfluctuation
-
-    Performs very poorly! It can select intervals with large underfluctuations
-    far away from the signal
+class PoissonSeeker(fastubl.NeymanConstruction):
+    """Use P(more events in interval), in interval with lowest Poisson upper
+    limit.
     """
+    def __init__(self, *args, optimize_for_cl=0.9, **kwargs):
+        self.optimize_for_cl = optimize_for_cl
+        super().__init__(*args, **kwargs)
 
     def statistic(self, r, mu_null):
         # NB: using -log(pmax)
+        if 'best_poisson' not in r:
+            r['best_poisson'] = best_poisson_limit(
+                r['x_obs'],
+                r['present'],
+                dists=self.dists,
+                bg_mus=self.true_mu[1:],
+                cl=self.optimize_for_cl)
 
-        pmax, *_ = sparsest_interval(
-            r['x_obs'],
-            r['present'],
-            dists=self.dists,
-            mus=np.concatenate([[mu_null], self.true_mu[1:]]))
+        bp = r['best_poisson']
+        pmax = stats.poisson(bp['f_sig'] * mu_null + bp['mu_bg'])\
+                .sf(bp['n_observed'])
 
         # Excesses give low pmax, so we need to invert (or sign-flip)
         # to use the regular interval setting code.
@@ -30,9 +36,8 @@ class PMaxBG(fastubl.NeymanConstruction):
 
 
 @export
-def sparsest_interval(x_obs, present, dists, mus):
-    """Find interval that was most likely to contain more events
-    than observed.
+def best_poisson_limit(x_obs, present, dists, bg_mus, cl=fastubl.DEFAULT_CL):
+    """Find best Poisson limit among intervals
 
     :param x: (trial_i, event_j)
     :param present: (trial_i, event_j)
@@ -47,7 +52,7 @@ def sparsest_interval(x_obs, present, dists, mus):
             ...
         lx, rx: left, right x_obs boundaries of intervals
     """
-    assert len(mus) == len(dists)
+    assert len(bg_mus) == len(dists) - 1
     n_events = present.sum(axis=1)
     nmax = n_events.max()
 
@@ -62,12 +67,21 @@ def sparsest_interval(x_obs, present, dists, mus):
                         np.ones((n_trials, 1)) * float('inf')],
                        axis=1)
 
-    # Get CDF * mu at each of the observed events.
+    # Get CDF * mu for the backgrounds at each of the observed events.
     # this is a (trial_i, event_j) matrix, like x
-    cdf_mu = np.sum(np.stack([
-        dist.cdf(x) * mu
-        for dist, mu in zip(dists, mus)],
-        axis=2), axis=2)
+    if not len(bg_mus):
+        cdf_mu_bgs = np.zeros_like(x)
+    else:
+        cdf_mu_bgs = np.stack([
+            dist.cdf(x) * mu
+            for dist, mu in zip(dists[1:], bg_mus)],
+            axis=2).sum(axis=2)
+
+    # Lookup signal cdf at the events
+    cdf_sig = dists[0].cdf(x)
+
+    # Poisson upper limits for all event counts we need consider
+    poisson_uls_flat = fastubl.poisson_ul(np.arange(nmax+1))
 
     # Get matrices of inclusive (left, right) indices of all intervals.
     # With the addition of two 'events' at the bounds, we have nmax+2 valid
@@ -79,28 +93,28 @@ def sparsest_interval(x_obs, present, dists, mus):
     # Events observed inside interval; negative for invalid intervals.
     n_observed = right - left - 1
 
-    # Get expected events inside all intervals
-    mu = cdf_mu[:, right]  - cdf_mu[:, left]
+    # Get expected background events inside all intervals
+    mu_bg = cdf_mu_bgs[:, right]  - cdf_mu_bgs[:, left]
+    f_sig = cdf_sig[:, right] - cdf_sig[:, left]
 
-    # TODO: much of the above can be cached ... but would that actually help?
+    # Obtained Poisson upper limit
 
-    # P of observing more events inside the interval
-    p_more_events = np.where(
+    poisson_uls = np.where(
         n_observed >= 0,
-        stats.poisson(mu).sf(n_observed),
-        -1)
+        (poisson_uls_flat[n_observed.clip(0, None)] - mu_bg) \
+            # Note: clip to poisson_uls_flat[0] to avoid
+            # attraction to background underfluctuations
+            .clip(poisson_uls_flat[0], None) / f_sig,
+        float('inf'))
 
-    # Find highest p_more_events
-    i = np.argmax(p_more_events, axis=1)
+    # Find lowest Poisson UL
+    i = np.argmin(poisson_uls, axis=1)
     li, ri = left.ravel()[i], right.ravel()[i]
-    lx, rx = _lookup_axis1(x, li), _lookup_axis1(x, ri)
-    return _lookup_axis1(p_more_events, i), (li, ri), (lx, rx)
-
-
-def _lookup_axis1(x, indices):
-    """Return values of x at indices along axis 1"""
-    d = indices
-    return np.take_along_axis(
-        x,
-        d.reshape(len(d), -1), axis=1
-    ).reshape(d.shape)
+    lookup = fastubl.lookup_axis1
+    lx, rx = lookup(x, li), lookup(x, ri)
+    return dict(poisson_ul=lookup(poisson_uls, i),
+                interval_indices=(li, ri),
+                interval_bounds=(lx, rx),
+                n_observed=n_observed[i],
+                mu_bg=lookup(mu_bg, i),
+                f_sig=lookup(f_sig, i))

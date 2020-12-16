@@ -16,3 +16,13 @@ def exporter(export_self=False):
 
 
 export, __all__ = exporter(export_self=True)
+
+
+@export
+def lookup_axis1(x, indices):
+    """Return values of x at indices along axis 1"""
+    d = indices
+    return np.take_along_axis(
+        x,
+        d.reshape(len(d), -1), axis=1
+    ).reshape(d.shape)
