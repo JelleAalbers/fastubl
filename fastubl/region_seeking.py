@@ -59,8 +59,6 @@ class PoissonGuidedLikelihood(fastubl.UnbinnedLikelihoodExact):
                 bg_mus=self.true_mu[1:],
                 cl=self.optimize_for_cl)
 
-            # TODO: compute new mus and pobs here, to save time?
-
         # Mask out data, except in the interval
         intervals = r['best_poisson']['interval_bounds']
         in_interval = ((intervals[0][:,np.newaxis] < r['x_obs'])

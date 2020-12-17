@@ -40,29 +40,12 @@ class UnbinnedLikelihoodBase:
         """
         p_obs, present = r['p_obs'], r['present']
         assert p_obs.shape[2] == self.n_sources
-        mus, p_obs = self._correct_mus_pobs(mu_signal, r)  # -> (trial_i, source_i)
-
-        inner_term = np.sum(p_obs * mus[:, np.newaxis, :],
-                            axis=2)  # -> (trial_i, event_i)
-
-        # This avoids floating-point warnings/errors
-        # inner_term must always be multiplied by present!
-        inner_term[~present] = 1
-
-        ll = (-mus.sum(axis=1) + np.sum(
-            special.xlogy(present, inner_term),
-            axis=1))
-        if not gradient:
-            return ll
-
-        grad = (-1 + np.sum(
-            present * p_obs[:, :, 0] / inner_term,
-            axis=1))
-        if np.any(np.isnan(ll)) or np.any(np.isnan(grad)):
-            raise RuntimeError("Bad stuff happening")
-        if not np.all(np.isfinite(ll)) and np.all(np.isfinite(grad)):
-            raise RuntimeError("Also bad stuff happening")
-        return ll, grad
+        mus = self._mu_array(mu_signal)   # (trials, sources)
+        if 'acceptance' in r:
+            mus = mus * r['acceptance']
+            # p_obs increases for lower acceptance (PDF renormalizes)
+            p_obs = p_obs / r['acceptance'][:, None, :]
+        return log_likelihood(p_obs, present, mus, gradient=gradient)
 
     def optimize(self, r, guess=None):
         """Return (best-fit signal rate mu_best,
@@ -124,3 +107,42 @@ class UnbinnedLikelihoodWilks(UnbinnedLikelihoodBase,
             # TODO: justify in a comment here
             critical_ts = stats.norm.ppf(cl)**2 * np.sign(cl - 0.5)
         return np.ones(len(self.mu_s_grid)) * critical_ts
+
+
+@export
+def log_likelihood(p_obs, present, mus, gradient=True):
+    """Compute log likelihood
+
+    :param p_obs: P(event | source), (trials, events, sources) array
+    :param present: whether event is real, (trials, events) array
+    :param mus: applicable mus, (trials, sources) array
+    :param gradient: If True, instead return (ll, grad) tuple
+        of arrays. Second element is derivative of ll with respect
+        to mu_signal.
+    :return: log likelihood, (trials) array
+    """
+    n_trials, n_events, n_sources = p_obs.shape
+    assert present.shape == (n_trials, n_events)
+    assert mus.shape == (n_trials, n_sources)
+
+    inner_term = np.sum(p_obs * mus[:, np.newaxis, :],
+                        axis=2)  # -> (trial_i, event_i)
+
+    # This avoids floating-point warnings/errors
+    # inner_term must always be multiplied by present!
+    inner_term[~present] = 1
+
+    ll = (-mus.sum(axis=1) + np.sum(
+        special.xlogy(present, inner_term),
+        axis=1))
+    if not gradient:
+        return ll
+
+    grad = (-1 + np.sum(
+        present * p_obs[:, :, 0] / inner_term,
+        axis=1))
+    if np.any(np.isnan(ll)) or np.any(np.isnan(grad)):
+        raise RuntimeError("Bad stuff happening")
+    if not np.all(np.isfinite(ll)) and np.all(np.isfinite(grad)):
+        raise RuntimeError("Also bad stuff happening")
+    return ll, grad
