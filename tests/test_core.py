@@ -11,6 +11,7 @@ import fastubl
         "OptimalCutPoisson",
         "UnbinnedLikelihoodWilks",
         "MaxGap",
+        "SacrificialPoisson"
 ))
 def proc(request):
     bg_slope = 0.2
