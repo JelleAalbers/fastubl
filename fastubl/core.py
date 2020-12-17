@@ -8,9 +8,9 @@ import numpy as np
 from scipy import stats
 from tqdm import tqdm
 
-from .utils import exporter
+import fastubl
 
-export, __all__ = exporter()
+export, __all__ = fastubl.exporter()
 __all__ += ['DEFAULT_BATCH_SIZE',
             'DEFAULT_MU_S_GRID',
             'DEFAULT_CL',
@@ -25,7 +25,9 @@ DEFAULT_KIND = 'upper'
 @export
 class StatisticalProcedure:
 
-    def __init__(self, true_mu, dists, labels=None, mu_s_grid=None):
+    def __init__(self,
+                 signal, *backgrounds,
+                 mu_s_grid=None):
         """Generic statistical procedure
 
         :param true_mu: Sequence of true expected number of events.
@@ -35,26 +37,21 @@ class StatisticalProcedure:
         :param labels: Sequence of labels;
         :param mu_s_grid: array of mu hypotheses used for testing
         """
-        self.true_mu = true_mu
-        self.dists = dists
+        self.sources = sources = [signal] + list(backgrounds)
+        for s in sources:
+            assert isinstance(s, dict), "Sources must be specified as dicts"
+
+        self.n_sources = len(sources)
+        self.true_mu = np.array([s.get('mu', 0) for s in sources])
+        self.dists = [getattr(stats, s['distribution'])(**s.get('params', {}))
+                      for s in sources]
+        self.labels =[s.get('label',
+                            'Signal' if i == 0 else f'Background {i-1}')
+                      for i, s in enumerate(sources)]
+
         if mu_s_grid is None:
             mu_s_grid = DEFAULT_MU_S_GRID.copy()
         self.mu_s_grid = mu_s_grid
-
-        n_bgs = len(self.dists) - 1
-        if n_bgs < 0:
-            raise ValueError("Provide at least a signal distribution")
-
-        if labels is None:
-            labels = ['Signal']
-            if n_bgs == 1:
-                labels += ['Background']
-            else:
-                labels += ['Background %d' % i
-                           for i in range(n_bgs)]
-        self.labels = tuple(labels)
-
-        self.n_sources = len(self.dists)
 
     def show_pdfs(self, domain=None):
         if domain is None:
@@ -318,7 +315,41 @@ class RegularProcedure(StatisticalProcedure):
 @export
 class NeymanConstruction(RegularProcedure):
 
-    mc_results : np.ndarray   # (mu_s, trial i)
+    mc_results : np.ndarray = None   # (mu_s, trial i)
+
+    def __init__(self, *args,
+                 cache_folder='./fastubl_neyman_cache',
+                 trials_per_s=int(5000),
+                 cache=True,
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # TODO: include extra options with Neyman hash in child classes?
+        self.hash = fastubl.deterministic_hash(dict(
+            sources=self.sources,
+            mu_s_grid=self.mu_s_grid))
+        fn = os.path.join(
+            cache_folder,
+            f'{self.__class__.__name__}_{trials_per_s}_{self.hash}')
+        if cache:
+            os.makedirs(cache_folder, exist_ok=True)
+            if os.path.exists(fn):
+                with open(fn, mode='rb') as f:
+                    self.mc_results = pickle.load(f)
+
+        if self.mc_results is None:
+            self.mc_results = np.zeros((self.mu_s_grid.size, trials_per_s))
+            for i, mu_s in enumerate(tqdm(self.mu_s_grid,
+                                          desc='MC for Neyman construction')):
+                self.mc_results[i] = \
+                    self.toy_statistics(trials_per_s,
+                                        mu_s_true=mu_s,
+                                        mu_null=mu_s,
+                                        progress=False)
+
+        if cache and not os.path.exists(fn):
+            with open(fn, mode='wb') as f:
+                pickle.dump(self.mc_results, f)
 
     def statistic(self, r, mu_null):
         """Return statistic evaluated at mu_null
@@ -331,26 +362,6 @@ class NeymanConstruction(RegularProcedure):
         if abs:
             x = np.abs(x)
         return np.percentile(x, cl * 100, axis=1)
-
-    def __init__(self, *args, filename=None, trials_per_s=int(1000), **kwargs):
-        super().__init__(*args, **kwargs)
-
-        if filename is not None and os.path.exists(filename):
-            with open(filename, mode='rb') as f:
-                self.mc_results = pickle.load(f)
-        else:
-            self.mc_results = np.zeros((self.mu_s_grid.size, trials_per_s))
-            for i, mu_s in enumerate(tqdm(self.mu_s_grid,
-                                          desc='MC for Neyman construction')):
-                self.mc_results[i] = \
-                    self.toy_statistics(trials_per_s,
-                                        mu_s_true=mu_s,
-                                        mu_null=mu_s,
-                                        progress=False)
-
-        if filename is not None and not os.path.exists(filename):
-            with open(filename, mode='wb') as f:
-                pickle.dump(self.mc_results, f)
 
 
 @numba.njit

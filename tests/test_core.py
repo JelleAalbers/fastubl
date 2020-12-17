@@ -13,12 +13,12 @@ import fastubl
         "MaxGap",
 ))
 def proc(request):
-    slope = 0.2
-    dist = stats.truncexpon(scale=slope, b=1 / slope)
-
+    bg_slope = 0.2
     return getattr(fastubl, request.param)(
-        true_mu=[0, 5],
-        dists=[stats.uniform(), dist])
+        dict(distribution='uniform', mu=0),
+        dict(distribution='truncexpon',
+             params=dict(scale=bg_slope, b=1 / bg_slope),
+             mu=5))
 
 
 def test_basics(proc):
