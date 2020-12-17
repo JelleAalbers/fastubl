@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 import numpy as np
 from scipy import stats
 
@@ -25,14 +27,55 @@ class PoissonSeeker(fastubl.NeymanConstruction):
                 bg_mus=self.true_mu[1:],
                 cl=self.optimize_for_cl)
 
+        mu_bg = np.sum(r['best_poisson']['acceptance'][:,1:]
+                       * np.array(self.true_mu[1:])[np.newaxis, :],
+                       axis=1)
+        mu_sig = mu_null * r['best_poisson']['acceptance'][:,0]
+
         bp = r['best_poisson']
-        pmax = stats.poisson(bp['f_sig'] * mu_null + bp['mu_bg'])\
-                .sf(bp['n_observed'])
+        pmax = stats.poisson(mu_sig + mu_bg).sf(bp['n_observed'])
 
         # Excesses give low pmax, so we need to invert (or sign-flip)
         # to use the regular interval setting code.
         # Logging seems nice anyway
         return -np.log(np.maximum(pmax, 1.e-9))
+
+
+@export
+class PoissonGuidedLikelihood(fastubl.UnbinnedLikelihoodExact):
+    """Likelihood inside interval found by Poisson seeker
+    """
+    def __init__(self, *args, optimize_for_cl=0.9, **kwargs):
+        self.optimize_for_cl = optimize_for_cl
+        super().__init__(*args, **kwargs)
+
+    def statistic(self, r, mu_null):
+        # NB: using -log(pmax)
+        if 'best_poisson' not in r:
+            r['best_poisson'] = best_poisson_limit(
+                r['x_obs'],
+                r['present'],
+                dists=self.dists,
+                bg_mus=self.true_mu[1:],
+                cl=self.optimize_for_cl)
+
+            # TODO: compute new mus and pobs here, to save time?
+
+        # Mask out data, except in the interval
+        intervals = r['best_poisson']['interval_bounds']
+        in_interval = ((intervals[0][:,np.newaxis] < r['x_obs'])
+                       & (r['x_obs'] < intervals[1][:,np.newaxis]))
+
+        new_r = {
+            **r,
+            'present': r['present'] & in_interval,
+            'acceptance': r['best_poisson']['acceptance']}
+        result = super().statistic(new_r, mu_null)
+        # Add any new keys computed by the statistic (e.g. mu_best)
+        for k in new_r.keys():
+            if k not in r:
+                r[k] = new_r[k]
+        return result
 
 
 @export
@@ -53,6 +96,7 @@ def best_poisson_limit(x_obs, present, dists, bg_mus, cl=fastubl.DEFAULT_CL):
         lx, rx: left, right x_obs boundaries of intervals
     """
     assert len(bg_mus) == len(dists) - 1
+    bg_mus = np.asarray(bg_mus)
     n_events = present.sum(axis=1)
     nmax = n_events.max()
 
@@ -67,19 +111,6 @@ def best_poisson_limit(x_obs, present, dists, bg_mus, cl=fastubl.DEFAULT_CL):
                         np.ones((n_trials, 1)) * float('inf')],
                        axis=1)
 
-    # Get CDF * mu for the backgrounds at each of the observed events.
-    # this is a (trial_i, event_j) matrix, like x
-    if not len(bg_mus):
-        cdf_mu_bgs = np.zeros_like(x)
-    else:
-        cdf_mu_bgs = np.stack([
-            dist.cdf(x) * mu
-            for dist, mu in zip(dists[1:], bg_mus)],
-            axis=2).sum(axis=2)
-
-    # Lookup signal cdf at the events
-    cdf_sig = dists[0].cdf(x)
-
     # Poisson upper limits for all event counts we need consider
     poisson_uls_flat = fastubl.poisson_ul(np.arange(nmax+1))
 
@@ -91,30 +122,42 @@ def best_poisson_limit(x_obs, present, dists, bg_mus, cl=fastubl.DEFAULT_CL):
     left, right = left.ravel(), right.ravel()
 
     # Events observed inside interval; negative for invalid intervals.
-    n_observed = right - left - 1
+    n_observed = right - left - 1                 # (indices)
 
-    # Get expected background events inside all intervals
-    mu_bg = cdf_mu_bgs[:, right]  - cdf_mu_bgs[:, left]
-    f_sig = cdf_sig[:, right] - cdf_sig[:, left]
+    # Find acceptances (fraction of surviving events) of each interval
+    # (trial, event, source)
+    _cdfs = np.stack([dist.cdf(x) for dist in dists], axis=2)
+    acceptance = _cdfs[:, right, :] - _cdfs[:, left, :]
+    assert len(acceptance.shape) == 3
 
-    # Obtained Poisson upper limit
+    if bg_mus:
+        # Get expected background events inside all intervals
+        # (trial, interval)
+        mu_bg = (bg_mus[np.newaxis, np.newaxis, :]
+                 * acceptance[:, :, 1:]).sum(axis=2)
+    else:
+        mu_bg = np.zeros((n_trials, len(left)))
 
+    # Obtain Poisson upper limits; (trial, interval) array
     poisson_uls = np.where(
         n_observed >= 0,
         (poisson_uls_flat[n_observed.clip(0, None)] - mu_bg) \
             # Note: clip to poisson_uls_flat[0] to avoid
             # attraction to background underfluctuations
-            .clip(poisson_uls_flat[0], None) / f_sig,
+            .clip(poisson_uls_flat[0], None) / acceptance[:,:,0],
         float('inf'))
 
-    # Find lowest Poisson UL
+    # Find lowest Poisson UL. This is still an (n_trials,) array!
     i = np.argmin(poisson_uls, axis=1)
-    li, ri = left.ravel()[i], right.ravel()[i]
+
+    # Interval/event indices for each trial; (n_trials,) arrays
+    li, ri = left[i], right[i]
+
+    # Get (trials, sources) array of acceptances of the interval
     lookup = fastubl.lookup_axis1
-    lx, rx = lookup(x, li), lookup(x, ri)
+
     return dict(poisson_ul=lookup(poisson_uls, i),
                 interval_indices=(li, ri),
-                interval_bounds=(lx, rx),
+                interval_bounds=(lookup(x, li), lookup(x, ri)),
                 n_observed=n_observed[i],
-                mu_bg=lookup(mu_bg, i),
-                f_sig=lookup(f_sig, i))
+                acceptance=lookup(acceptance, i))

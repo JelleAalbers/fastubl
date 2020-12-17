@@ -119,11 +119,24 @@ class StatisticalProcedure:
             p_obs[:, :, i] = dist.pdf(x)
         return p_obs
 
-    def _stack_mus(self, mu_s):
-        return np.stack(
-            [mu_s] + [mu * np.ones_like(mu_s)
-                      for mu in self.true_mu[1:]],
-            axis=1)
+    def _correct_mus_pobs(self, mu_s, r):
+        """Return (n_trials, n_sources) array of mus
+        :param mu_s: Hypothesized signal mu, (ntrials) array
+        :param r: results/data dict, possibly with acceptances
+        """
+        assert isinstance(mu_s, np.ndarray)
+        n_trials = mu_s.size
+        mu_bg = (np.array(self.true_mu[1:])[np.newaxis, :]
+                 * np.ones((n_trials, 1)))
+        mu_s = mu_s.reshape(-1, 1)
+        mus = np.concatenate([mu_s, mu_bg], axis=1)
+
+        if 'acceptance' in r:
+            # p_obs increases for lower acceptance (PDF renormalizes)
+            return (mus * r['acceptance'],
+                    r['p_obs'] / r['acceptance'][:,None,:])
+        else:
+            return mus, r['p_obs']
 
     def _wrap_toy_maker(self, toy_maker):
         if toy_maker is None:
