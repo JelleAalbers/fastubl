@@ -160,9 +160,11 @@ class StatisticalProcedure:
         else:
             assert isinstance(toy_maker, StatisticalProcedure)
             toy_maker = toy_maker.make_toys
+        n_trials = int(n_trials)
+        batch_size = int(batch_size)
 
-        n_batches = n_trials // batch_size + 1
-        last_batch_size = n_trials % batch_size
+        n_batches = int(np.ceil(n_trials / batch_size))
+        last_batch_size = n_trials - (n_batches - 1) * batch_size
 
         iter = range(n_batches)
         if progress:
@@ -319,7 +321,7 @@ class NeymanConstruction(RegularProcedure):
 
     def __init__(self, *args,
                  cache_folder='./fastubl_neyman_cache',
-                 trials_per_s=int(5000),
+                 trials_per_s=int(2000),
                  cache=True,
                  **kwargs):
         super().__init__(*args, **kwargs)
