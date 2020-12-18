@@ -31,8 +31,8 @@ class MaxGap(fastubl.StatisticalProcedure):
         indices are in sorted version of r['x'], with non-present events removed
         """
         xn = fastubl.yellin_normalize(r['x_obs'],
-                                    r['present'],
-                                    cdf=self.dists[0].cdf)
+                                      r['present'],
+                                      cdf=self.dists[0].cdf)
         sizes, skips = fastubl.k_largest(xn, max_n=0)
         return sizes[..., 0], skips[..., 0]
 

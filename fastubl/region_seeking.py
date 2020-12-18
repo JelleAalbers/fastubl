@@ -1,5 +1,3 @@
-from contextlib import contextmanager
-
 import numpy as np
 from scipy import stats
 
@@ -15,12 +13,13 @@ class PoissonSeeker(fastubl.NeymanConstruction):
     """
     def __init__(self, *args, optimize_for_cl=0.9, **kwargs):
         self.optimize_for_cl = optimize_for_cl
+        self.guide = fastubl.PoissonGuide()
         super().__init__(*args, **kwargs)
 
     def statistic(self, r, mu_null):
         # NB: using -log(pmax)
         if 'best_poisson' not in r:
-            r['best_poisson'] = fastubl.best_poisson_limit(
+            r['best_poisson'] = self.guide(
                 r['x_obs'],
                 r['present'],
                 dists=self.dists,
@@ -47,12 +46,13 @@ class PoissonGuidedLikelihood(fastubl.UnbinnedLikelihoodExact):
     """
     def __init__(self, *args, optimize_for_cl=0.9, **kwargs):
         self.optimize_for_cl = optimize_for_cl
+        self.guide = fastubl.PoissonGuide()
         super().__init__(*args, **kwargs)
 
     def statistic(self, r, mu_null):
         # NB: using -log(pmax)
         if 'best_poisson' not in r:
-            r['best_poisson'] = fastubl.best_poisson_limit(
+            r['best_poisson'] = self.guide(
                 r['x_obs'],
                 r['present'],
                 dists=self.dists,

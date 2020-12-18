@@ -128,6 +128,7 @@ class SacrificialPoisson(fastubl.StatisticalProcedure):
         super().__init__(*args, **kwargs)
         self.sacrifice_f = sacrifice_f
         self.optimize_for_cl = optimize_for_cl
+        self.guide = fastubl.PoissonGuide()
 
     def compute_intervals(self, r,
                           kind=fastubl.DEFAULT_KIND,
@@ -137,7 +138,7 @@ class SacrificialPoisson(fastubl.StatisticalProcedure):
         is_training = np.random.rand(*r['present'].shape) < self.sacrifice_f
 
         # Find best Poisson limit on training data
-        best_poisson = fastubl.best_poisson_limit(
+        best_poisson = self.guide(
             r['x_obs'],
             r['present'] & is_training,
             dists=self.dists,
@@ -173,92 +174,3 @@ def poisson_ul(n, mu_bg=0, cl=fastubl.DEFAULT_CL):
     It's your responsibility to clip to 0...
     """
     return stats.chi2.ppf(cl, 2 * n + 2) / 2 - mu_bg
-
-
-@export
-def best_poisson_limit(x_obs, present, dists, bg_mus, cl=fastubl.DEFAULT_CL):
-    """Find best Poisson limit among all intervals in the data
-
-    :param x_obs: (trial_i, event_j)
-    :param present: (trial_i, event_j)
-    :param dists: signal and background distributions
-    :param bg_mus: expected events for backgrounds
-
-    :return: Dict with
-        poisson_ul: Best Poisson UL
-        n_observed: Events counted in intervals, (n_trials) array
-        interval_indices: (left, right) event indices (inclusive) of intervals
-            each (n_trials) arrays.
-            0 = start of domain (e.g. -float('inf')
-            1 = at first event
-            ...
-        interval_bounds: left, right x_obs boundaries of intervals
-            each (n_trials) arrays
-        acceptance: (n_trials, n_sources) array of interval acceptance
-    """
-    assert len(bg_mus) == len(dists) - 1
-    bg_mus = np.asarray(bg_mus)
-    n_events = present.sum(axis=1)
-    nmax = n_events.max()
-
-    # Map fake events to inf, where they won't affect the method.
-    # Sort by ascending x values, then add fake events at (-inf, inf)
-    # (This is similar to 'Yellin normalize' in yellin.py)
-    x = np.where(present, x_obs, float('inf'))
-    x = np.sort(x, axis=-1)
-    n_trials = x.shape[0]
-    x = np.concatenate([-np.ones((n_trials, 1)) * float('inf'),
-                        x,
-                        np.ones((n_trials, 1)) * float('inf')],
-                       axis=1)
-
-    # Poisson upper limits for all event counts we need consider
-    poisson_uls_flat = fastubl.poisson_ul(np.arange(nmax+1), cl=cl)
-
-    # Get matrices of inclusive (left, right) indices of all intervals.
-    # With the addition of two 'events' at the bounds, we have nmax+2 valid
-    # indices to consider.
-    # left indices change quickly, right indices repeat before changing.
-    left, right = np.meshgrid(np.arange(nmax+2), np.arange(nmax+2))
-    left, right = left.ravel(), right.ravel()
-
-    # Events observed inside interval; negative for invalid intervals.
-    n_observed = right - left - 1                 # (indices)
-
-    # Find acceptances (fraction of surviving events) of each interval
-    # (trial, event, source)
-    _cdfs = np.stack([dist.cdf(x) for dist in dists], axis=2)
-    acceptance = _cdfs[:, right, :] - _cdfs[:, left, :]
-    assert len(acceptance.shape) == 3
-
-    if bg_mus:
-        # Get expected background events inside all intervals
-        # (trial, interval)
-        mu_bg = (bg_mus[np.newaxis, np.newaxis, :]
-                 * acceptance[:, :, 1:]).sum(axis=2)
-    else:
-        mu_bg = np.zeros((n_trials, len(left)))
-
-    # Obtain Poisson upper limits; (trial, interval) array
-    poisson_uls = np.where(
-        n_observed >= 0,
-        (poisson_uls_flat[n_observed.clip(0, None)] - mu_bg) \
-            # Note: clip to poisson_uls_flat[0] to avoid
-            # attraction to background underfluctuations
-            .clip(poisson_uls_flat[0], None) / acceptance[:,:,0],
-        float('inf'))
-
-    # Find lowest Poisson UL. This is still an (n_trials,) array!
-    i = np.argmin(poisson_uls, axis=1)
-
-    # Interval/event indices for each trial; (n_trials,) arrays
-    li, ri = left[i], right[i]
-
-    # Get (trials, sources) array of acceptances of the interval
-    lookup = fastubl.lookup_axis1
-
-    return dict(poisson_ul=lookup(poisson_uls, i),
-                interval_indices=(li, ri),
-                interval_bounds=(lookup(x, li), lookup(x, ri)),
-                n_observed=n_observed[i],
-                acceptance=lookup(acceptance, i))
