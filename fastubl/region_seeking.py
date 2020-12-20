@@ -11,20 +11,19 @@ class PoissonSeeker(fastubl.NeymanConstruction):
     """Use P(more events in interval), in interval with lowest Poisson upper
     limit.
     """
-    def __init__(self, *args, optimize_for_cl=0.9, **kwargs):
-        self.optimize_for_cl = optimize_for_cl
-        self.guide = fastubl.PoissonGuide()
+    def __init__(self, *args, optimize_for_cl=fastubl.DEFAULT_CL, **kwargs):
+        self.guide = fastubl.PoissonGuide(optimize_for_cl)
         super().__init__(*args, **kwargs)
 
     def statistic(self, r, mu_null):
         # NB: using -log(pmax)
         if 'best_poisson' not in r:
             r['best_poisson'] = self.guide(
-                r['x_obs'],
-                r['present'],
+                x_obs=r['x_obs'],
+                present=r['present'],
+                p_obs=r['p_obs'],
                 dists=self.dists,
-                bg_mus=self.true_mu[1:],
-                cl=self.optimize_for_cl)
+                bg_mus=self.true_mu[1:])
 
         mu_bg = np.sum(r['best_poisson']['acceptance'][:,1:]
                        * np.array(self.true_mu[1:])[np.newaxis, :],
@@ -40,37 +39,50 @@ class PoissonSeeker(fastubl.NeymanConstruction):
         return -np.log(np.maximum(pmax, 1.e-9))
 
 
-@export
-class PoissonGuidedLikelihood(fastubl.UnbinnedLikelihoodExact):
-    """Likelihood inside interval found by Poisson seeker
-    """
-    def __init__(self, *args, optimize_for_cl=0.9, **kwargs):
-        self.optimize_for_cl = optimize_for_cl
-        self.guide = fastubl.PoissonGuide()
-        super().__init__(*args, **kwargs)
+
+class GuidedLikelihoodBase(fastubl.UnbinnedLikelihoodExact):
 
     def statistic(self, r, mu_null):
         # NB: using -log(pmax)
-        if 'best_poisson' not in r:
-            r['best_poisson'] = self.guide(
-                r['x_obs'],
-                r['present'],
+        if 'guide_result' not in r:
+            r['guide_result'] = self.guide(
+                x_obs=r['x_obs'],
+                present=r['present'],
+                p_obs=r['p_obs'],
                 dists=self.dists,
-                bg_mus=self.true_mu[1:],
-                cl=self.optimize_for_cl)
+                bg_mus=self.true_mu[1:])
 
         # Mask out data, except in the interval
-        intervals = r['best_poisson']['interval_bounds']
+        intervals = r['guide_result']['interval_bounds']
         in_interval = ((intervals[0][:,np.newaxis] < r['x_obs'])
                        & (r['x_obs'] < intervals[1][:,np.newaxis]))
 
         new_r = {
             **r,
             'present': r['present'] & in_interval,
-            'acceptance': r['best_poisson']['acceptance']}
+            'acceptance': r['guide_result']['acceptance']}
         result = super().statistic(new_r, mu_null)
-        # Add any new keys computed by the statistic (e.g. mu_best)
+        # Add new keys computed by the statistic, e.g. mu_best
         for k in new_r.keys():
             if k not in r:
                 r[k] = new_r[k]
         return result
+
+
+@export
+class PoissonGuidedLikelihood(fastubl.UnbinnedLikelihoodExact):
+    """Likelihood inside interval found by Poisson seeker
+    """
+    def __init__(self, *args, optimize_for_cl=fastubl.DEFAULT_CL, **kwargs):
+        self.guide = fastubl.PoissonGuide(optimize_for_cl=optimize_for_cl)
+        super().__init__(*args, **kwargs)
+
+
+@export
+class LikelihoodGuidedLikelihood(fastubl.UnbinnedLikelihoodExact):
+    def __init__(self,
+                 *args,
+                 mu_reference=fastubl.DEFAULT_MU_REFERENCE,
+                 **kwargs):
+        self.guide = fastubl.LikelihoodGuide(mu_reference)
+        super().__init__(*args, **kwargs)

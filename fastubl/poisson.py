@@ -127,8 +127,7 @@ class SacrificialPoisson(fastubl.StatisticalProcedure):
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.sacrifice_f = sacrifice_f
-        self.optimize_for_cl = optimize_for_cl
-        self.guide = fastubl.PoissonGuide()
+        self.guide = fastubl.PoissonGuide(optimize_for_cl)
 
     def compute_intervals(self, r,
                           kind=fastubl.DEFAULT_KIND,
@@ -139,11 +138,11 @@ class SacrificialPoisson(fastubl.StatisticalProcedure):
 
         # Find best Poisson limit on training data
         best_poisson = self.guide(
-            r['x_obs'],
-            r['present'] & is_training,
+            x_obs=r['x_obs'],
+            present=r['present'] & is_training,
+            p_obs=r['p_obs'],
             dists=self.dists,
-            bg_mus=self.true_mu[1:] * self.sacrifice_f,
-            cl=self.optimize_for_cl)
+            bg_mus=self.true_mu[1:] * self.sacrifice_f)
 
         # Compute Poisson limit on test data in the same interval
         left, right = best_poisson['interval_bounds']
