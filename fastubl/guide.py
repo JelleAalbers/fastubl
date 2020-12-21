@@ -7,7 +7,7 @@ export, __all__ = fastubl.exporter()
 __all__ += ['DEFAULT_MU_REFERENCE']
 
 DEFAULT_MU_REFERENCE = 10.
-
+lookup = fastubl.lookup_axis1
 
 @export
 class Guide:
@@ -47,8 +47,8 @@ class Guide:
 
         # Map fake events to inf, where they won't affect the method.
         x = np.where(present, x_obs, float('inf'))
-        # Sort by ascending x values, then
-        x = np.sort(x, axis=-1)
+        # Sort by ascending x values
+        x, p_obs, present = fastubl.sort_all_by_axis1(x, p_obs, present)
         # add fake events at(-inf, inf)
         n_trials = x.shape[0]
         x = np.concatenate([-np.ones((n_trials, 1)) * float('inf'),
@@ -101,7 +101,6 @@ class Guide:
         # Interval/event indices for each trial; (n_trials,) arrays
         li, ri = left[i], right[i]
 
-        lookup = fastubl.lookup_axis1
         return dict(interval_indices=(li, ri),
                     n_observed=n_observed[i],
                     guide_results=lookup(guide_results, i),
@@ -142,44 +141,43 @@ class PoissonGuide(Guide):
 
 @export
 class LikelihoodGuide(Guide):
-    """Guide to the interval that would most favor background-only
-    over a reference signal hypothesis in a likelihood-ratio test.
+    """Guide to the interval that would most favor low over high
+    signal hypotheses in a likelihood-ratio test.
     """
 
-    def __init__(self, ll, mu_reference=DEFAULT_MU_REFERENCE):
-        self.mu_reference = mu_reference
-        self.ll = ll
+    def __init__(self, mu_low, mu_high):
+        # TODO: mu_low and mu_high should be in Neyman hash!
+        self.mu_low, self.mu_high = mu_low, mu_high
 
     def guide(self, left, right, n_observed, p_obs, present, bg_mus, acceptance):
-        # Compute - log L(0)/L(mu_ref) for each interval
-        #   0: mu_ref and 0 fit equally well
-        #   +: favors mu_ref
-        #   -: favors background-only -> Good, guide is minimized.
+        # Compute - log L(mu_low)/L(mu_high) for each interval
+        #   0: fit equally well
+        #   +: favors mu_high
+        #   -: favors mu_low -> Good, we want this interval!
 
         # Compute differential rate (p * mu) for each event and source
         # Note this does not depend on the interval -- cuts reduce mu
         # and increase p_obs.
         # (trial, event, source) array
-        dr = (p_obs
-              * np.concatenate([[self.mu_reference], bg_mus]
-                               ).reshape((1, 1, -1)))
+        dr_mu_low = (p_obs * np.concatenate([[self.mu_low], bg_mus]).reshape((1, 1, -1))).sum(axis=2)
+        dr_mu_high = (p_obs * np.concatenate([[self.mu_high], bg_mus]).reshape((1, 1, -1))).sum(axis=2)
 
         # Inner term of log L = sum_events log(dr mu=0) - sum_events log(dr)
         # = sum_events [log(dr mu=0) - log(dr)]
-
         # Start with cumulative sum in brackets...
+        # (trials, events) array
         cumsum_inner = np.cumsum(
-            xlogy(present, dr[:,:,1:].sum(axis=2)).sum(axis=2)
-            - xlogy(present, dr.sum(axis=2).sum(axis=2)))
+            xlogy(present, dr_mu_low) - xlogy(present, dr_mu_high),
+            axis=1)
 
-        # ... then use interval indices to get only sums we need
+        # ... then use interval indices to get only sum over included events
         # right <= left "intervals" are already removed
-        # right = left + 1 means no events in the interval
-        inner = np.where(right > left + 1,
-                 cumsum_inner[left + 1] - cumsum_inner[right],
-                 np.zeros(left.shape))
+        # right = left + 1 means no events in the interval -> 0
+        # (trials, intervals) array
+        inner = cumsum_inner[:,right] - cumsum_inner[:,left + 1]
 
-        return -(
-            # -mu term: background is the same and cancels
-            np.squeeze(acceptance[:, :, 0] * self.mu_reference)
+        result = -(
+            # -mu term: background is the same under both hypotheses
+            ((-self.mu_low) - (-self.mu_high)) * acceptance[:,:,0]
             + inner)
+        return result

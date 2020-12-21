@@ -44,6 +44,28 @@ def lookup_axis1(x, indices):
     return result
 
 
+@export
+def sort_all_by_axis1(x, *others):
+    """Return (x sorted by axis 1, other arrays sorted in same order)
+
+    :param x: 2d array
+
+    Other arrays may have more dims than x,
+    but the first two dimensions must match in shape
+    """
+    # Adapted from https://stackoverflow.com/questions/6155649
+    sort_indices = np.argsort(x, axis=1)
+    results = []
+    for arr in [x] + list(others):
+        # Expand sort_indices with ones until it matches the arr.shape
+        si = sort_indices.reshape(tuple(
+            list(sort_indices.shape)
+            + [1] * (len(arr.shape)  - len(x.shape))))
+        indices = np.indices(arr.shape)
+        indices[1] = si
+        results.append(arr[tuple(indices)])
+    return tuple(results)
+
 
 @export
 def hashablize(obj):

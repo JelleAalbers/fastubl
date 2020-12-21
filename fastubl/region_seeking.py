@@ -70,7 +70,7 @@ class GuidedLikelihoodBase(fastubl.UnbinnedLikelihoodExact):
 
 
 @export
-class PoissonGuidedLikelihood(fastubl.UnbinnedLikelihoodExact):
+class PoissonGuidedLikelihood(GuidedLikelihoodBase):
     """Likelihood inside interval found by Poisson seeker
     """
     def __init__(self, *args, optimize_for_cl=fastubl.DEFAULT_CL, **kwargs):
@@ -79,10 +79,10 @@ class PoissonGuidedLikelihood(fastubl.UnbinnedLikelihoodExact):
 
 
 @export
-class LikelihoodGuidedLikelihood(fastubl.UnbinnedLikelihoodExact):
+class LikelihoodGuidedLikelihood(GuidedLikelihoodBase):
     def __init__(self,
                  *args,
-                 mu_reference=fastubl.DEFAULT_MU_REFERENCE,
+                 mu_low=1., mu_high=10.,
                  **kwargs):
-        self.guide = fastubl.LikelihoodGuide(mu_reference)
+        self.guide = fastubl.LikelihoodGuide(mu_low=mu_low, mu_high=mu_high)
         super().__init__(*args, **kwargs)
