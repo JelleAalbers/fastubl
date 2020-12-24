@@ -12,6 +12,7 @@ class PoissonSeeker(fastubl.NeymanConstruction):
     limit.
     """
     def __init__(self, *args, optimize_for_cl=fastubl.DEFAULT_CL, **kwargs):
+        self.optimize_for_cl = optimize_for_cl
         self.guide = fastubl.PoissonGuide(optimize_for_cl)
         super().__init__(*args, **kwargs)
 
@@ -38,6 +39,8 @@ class PoissonSeeker(fastubl.NeymanConstruction):
         # Logging seems nice anyway
         return -np.log(np.maximum(pmax, 1.e-9))
 
+    def extra_hash_dict(self):
+        return dict(optimize_for_cl=self.optimize_for_cl)
 
 
 class GuidedLikelihoodBase(fastubl.UnbinnedLikelihoodExact):
@@ -74,15 +77,24 @@ class PoissonGuidedLikelihood(GuidedLikelihoodBase):
     """Likelihood inside interval found by Poisson seeker
     """
     def __init__(self, *args, optimize_for_cl=fastubl.DEFAULT_CL, **kwargs):
+        self.optimize_for_cl = optimize_for_cl
         self.guide = fastubl.PoissonGuide(optimize_for_cl=optimize_for_cl)
         super().__init__(*args, **kwargs)
+
+    def extra_hash_dict(self):
+        return dict(optimize_for_cl=self.optimize_for_cl)
 
 
 @export
 class LikelihoodGuidedLikelihood(GuidedLikelihoodBase):
     def __init__(self,
                  *args,
-                 mu_low=1., mu_high=10.,
+                 mu_low=1., mu_high=40.,
                  **kwargs):
+        self.mu_low, self.mu_high = mu_low, mu_high
         self.guide = fastubl.LikelihoodGuide(mu_low=mu_low, mu_high=mu_high)
         super().__init__(*args, **kwargs)
+
+    def extra_hash_dict(self):
+        return dict(mu_low=self.mu_low, mu_high=self.mu_high)
+

@@ -233,7 +233,7 @@ class RegularProcedure(StatisticalProcedure):
         """
         raise NotImplementedError
 
-    def t_percentile(self, cl=DEFAULT_CL, abs=False):
+    def t_ppf(self, cl=DEFAULT_CL, abs=False):
         raise NotImplementedError
 
     def compute_intervals(self, r, cl=DEFAULT_CL, kind=DEFAULT_KIND):
@@ -248,18 +248,18 @@ class RegularProcedure(StatisticalProcedure):
         # of the t distribution! See Neyman belt construction diagram.
         kind = kind.lower()
         if kind == 'upper':
-            is_included = ts >= self.t_percentile(1 - cl)[:, np.newaxis]
+            is_included = ts >= self.t_ppf(1 - cl)[:, np.newaxis]
         elif kind == 'lower':
-            is_included = ts <= self.t_percentile(cl)[:, np.newaxis]
+            is_included = ts <= self.t_ppf(cl)[:, np.newaxis]
         elif kind == 'central':
             new_cl = 1 - 0.5 * (1 - cl)   # Twice as close to 1
             is_included =   \
-                (ts >= self.t_percentile(1 - new_cl)[:, np.newaxis]) \
-                & (ts <= self.t_percentile(new_cl)[:, np.newaxis])
+                (ts >= self.t_ppf(1 - new_cl)[:, np.newaxis]) \
+                & (ts <= self.t_ppf(new_cl)[:, np.newaxis])
         elif kind in ('abs_unified', 'feldman_cousins', 'fc'):
             # Feldman cousins: for every mu, include lowest absolute t values
             # => boundary is a high percentile
-            is_included = ts <= self.t_percentile(cl, abs=True)[:, np.newaxis]
+            is_included = ts <= self.t_ppf(cl, abs=True)[:, np.newaxis]
         else:
             raise NotImplementedError(f"Unsupporterd kind '{kind}'")
 
@@ -318,6 +318,7 @@ class RegularProcedure(StatisticalProcedure):
 class NeymanConstruction(RegularProcedure):
 
     mc_results : np.ndarray = None   # (mu_s, trial i)
+    extra_cache_attributes = tuple()
 
     def __init__(self, *args,
                  cache_folder='./fastubl_neyman_cache',
@@ -325,45 +326,70 @@ class NeymanConstruction(RegularProcedure):
                  cache=True,
                  **kwargs):
         super().__init__(*args, **kwargs)
+        self.trials_per_s = trials_per_s
 
         # TODO: include extra options with Neyman hash in child classes?
         self.hash = fastubl.deterministic_hash(dict(
             sources=self.sources,
-            mu_s_grid=self.mu_s_grid))
+            trials_per_s=self.trials_per_s,
+            mu_s_grid=self.mu_s_grid,
+            **self.extra_hash_dict()))
         fn = os.path.join(
             cache_folder,
             f'{self.__class__.__name__}_{trials_per_s}_{self.hash}')
+
+        loaded_from_cache = False
         if cache:
             os.makedirs(cache_folder, exist_ok=True)
             if os.path.exists(fn):
                 with open(fn, mode='rb') as f:
-                    self.mc_results = pickle.load(f)
+                    stuff = pickle.load(f)
+                    for k in self.cache_attributes():
+                        setattr(self, k, stuff[k])
+                    # (If any extra keys are stored in the pickle, ignore them)
+                loaded_from_cache = True
 
-        if self.mc_results is None:
-            self.mc_results = np.zeros((self.mu_s_grid.size, trials_per_s))
-            for i, mu_s in enumerate(tqdm(self.mu_s_grid,
-                                          desc='MC for Neyman construction')):
-                self.mc_results[i] = \
-                    self.toy_statistics(trials_per_s,
-                                        mu_s_true=mu_s,
-                                        mu_null=mu_s,
-                                        progress=False)
+        if not loaded_from_cache:
+            self.do_neyman_construction()
 
         if cache and not os.path.exists(fn):
             with open(fn, mode='wb') as f:
-                pickle.dump(self.mc_results, f)
+                to_cache = {
+                    k: getattr(self, k)
+                    for k in self.cache_attributes()}
+                pickle.dump(to_cache, f)
+
+    def cache_attributes(self):
+        return tuple(['mc_results'] + list(self.extra_cache_attributes))
+
+    def do_neyman_construction(self):
+        self.mc_results = np.zeros((self.mu_s_grid.size, self.trials_per_s))
+        for i, mu_s in enumerate(tqdm(self.mu_s_grid,
+                                      desc='MC for Neyman construction')):
+            self.mc_results[i] = \
+                self.toy_statistics(self.trials_per_s,
+                                    mu_s_true=mu_s,
+                                    mu_null=mu_s,
+                                    progress=False)
+        # Sort, so percentile lookups are easier
+        self.mc_results.sort(axis=1)
+
+    def extra_hash_dict(self):
+        return dict()
 
     def statistic(self, r, mu_null):
         """Return statistic evaluated at mu_null
         """
         raise NotImplementedError
 
-    def t_percentile(self, cl=DEFAULT_CL, abs=False):
+    def t_ppf(self, quantile=DEFAULT_CL, abs=False):
         """Return len(self.mu_s_grid) array of critical test statistic values"""
-        x = self.mc_results
         if abs:
-            x = np.abs(x)
-        return np.percentile(x, cl * 100, axis=1)
+            x = np.abs(self.mc_results)
+            return np.percentile(x, quantile * 100, axis=1)
+        else:
+            # Mc results are already sorted
+            return self.mc_results[:,np.round(quantile * self.trials_per_s).astype(np.int)]
 
 
 @numba.njit

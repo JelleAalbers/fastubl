@@ -96,9 +96,9 @@ class UnbinnedLikelihoodExact(UnbinnedLikelihoodBase,
 class UnbinnedLikelihoodWilks(UnbinnedLikelihoodBase,
                               fastubl.RegularProcedure):
 
-    def t_percentile(self,
-                     cl=fastubl.DEFAULT_CL,
-                     abs=False):
+    def t_ppf(self,
+              cl=fastubl.DEFAULT_CL,
+              abs=False):
         if abs:
             # For unsigned LR
             critical_ts = stats.chi2(1).ppf(cl)
