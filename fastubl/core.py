@@ -138,6 +138,16 @@ class StatisticalProcedure:
             return self.compute_ps(x), x, present
         return wrapped
 
+    def toy_data(self, n_trials, batch_size=None, mu_s_true=None):
+        # TODO: make different defaults for different methods
+        # And don't let this one behave weirdly
+        if batch_size is None:
+            batch_size = n_trials
+        return list(self.iter_toys(n_trials,
+                                   progress=False,
+                                   batch_size=batch_size,
+                                   mu_s_true=mu_s_true))[0]
+
     def iter_toys(self, n_trials,
                   batch_size=DEFAULT_BATCH_SIZE,
                   mu_s_true=None,

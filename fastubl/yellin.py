@@ -1,9 +1,23 @@
 import numpy as np
 from scipy import optimize, interpolate, special, stats
+from tqdm import tqdm
+
 import fastubl
 
 
 export, __all__ = fastubl.utils.exporter()
+
+
+def add_interval_sizes(r, cdf):
+    """
+
+    :param r:
+    :param cdf:
+    :return:
+    """
+    if 'sizes' not in r:
+        xn = fastubl.yellin_normalize(r['x_obs'], r['present'], cdf)
+        r['sizes'], r['skips'] = fastubl.k_largest(xn)
 
 
 @export
@@ -30,11 +44,8 @@ class MaxGap(fastubl.StatisticalProcedure):
         """Return (gap sizes, skip_events) of maximum gap
         indices are in sorted version of r['x'], with non-present events removed
         """
-        xn = fastubl.yellin_normalize(r['x_obs'],
-                                      r['present'],
-                                      cdf=self.dists[0].cdf)
-        sizes, skips = fastubl.k_largest(xn, max_n=0)
-        return sizes[..., 0], skips[..., 0]
+        add_interval_sizes(r, self.dists[0].cdf)
+        return r['sizes'][..., 0], r['skips'][..., 0]
 
     def limit_loglog_curve(self, cl):
         if cl not in self._limit_loglog_curves:
@@ -86,12 +97,7 @@ class PMax(fastubl.NeymanConstruction):
     def statistic(self, r, mu_null):
         # NB: using -log(pmax)
 
-        if 'sizes' not in r:
-            xn = fastubl.yellin_normalize(r['x_obs'],
-                                          r['present'],
-                                          cdf=self.dists[0].cdf)
-            # These are (trial_i, events_in_interval_j) matrices
-            r['sizes'], r['skips'] = fastubl.k_largest(xn)
+        add_interval_sizes(r, self.dists[0].cdf)
 
         # P(more events in random interval of size):
         p_more_events = stats.poisson(mu_null * r['sizes']).sf(
@@ -105,8 +111,62 @@ class PMax(fastubl.NeymanConstruction):
 
 
 @export
+class OptItv(fastubl.NeymanConstruction):
+    max_n: int
+    sizes_mc : np.ndarray  # (mu, max_n, mc_trials)
+
+    extra_cache_attributes = ('sizes_mc',)
+
+    def do_neyman_construction(self):
+        # Largest events per interval to consider
+        # TODO: currently we crash if this is exceeded in simulation
+        max_n = 5 + int(stats.poisson(self.mu_s_grid[-1] + self.true_mu[1:].sum()).ppf(.99999))
+
+        # Default is 1, since size largest interval with huge n is 1
+        self.sizes_mc = np.ones((
+            self.mu_s_grid.size,
+            max_n,
+            self.trials_per_s))
+
+        for mu_i, mu_s in enumerate(tqdm(
+                self.mu_s_grid,
+                desc='MC for interval size lookup table')):
+            r = self.toy_data(self.trials_per_s, mu_s_true=mu_s)
+            add_interval_sizes(r, self.dists[0].cdf)
+            self.sizes_mc[mu_i,:r['sizes'].shape[1],:] = r['sizes'].T
+        self.sizes_mc.sort(axis=2)
+
+        super().do_neyman_construction()
+
+    def statistic(self, r, mu_null):
+        add_interval_sizes(r, self.dists[0].cdf)
+
+        mu_i = np.searchsorted(self.mu_s_grid, mu_null)
+
+        # Compute P(size_n < observed| mu)
+        n_trials, max_n = r['sizes'].shape
+        cdf_size = np.zeros((n_trials, max_n))
+        # TODO: faster way? np.searchsorted has no axis argument...
+        # TODO: maybe numba helps?
+        for n in range(max_n):
+            # P(size_n < observed| mu)
+            # i.e. P that the n-interval is 'smaller' (has fewer events expected)
+            # Excess -> small intervals -> small ps
+            p = np.searchsorted(self.sizes_mc[mu_i, n], r['sizes'][:,n]) / self.trials_per_s
+            cdf_size[:, n] = p.clip(0, 1)
+
+        # Find optimum interval n (for this mu)
+        # optimum_n = np.argmax(cdf_size, axis=1)
+
+        # highest cdf_size -> least indication of excess
+        # (We have to flip sign for our Neyman code, just like c0 and pmax)
+        return -np.max(cdf_size, axis=1)  # TODO ?????????
+
+
+@export
 def k_largest(xn, max_n=None):
     """Return (sizes, skip_events) of largest intervals with different event count
+    Both are (n_trials, max_n) arrays.
 
     Here size is the expected number of events inside the interval,
     and skip_events is the number of observed events left of the start of the interval.
@@ -119,7 +179,8 @@ def k_largest(xn, max_n=None):
     :param present: presence mask
     :param cdf: Expected CDF, default is standard uniform
     :param max_n: Maximum event count inside interval to consider.
-        Defaults to len(x) - 2, i.e. all events except the fake boundary events
+        Defaults to len(x) - 2, i.e. all events except the fake boundary events\
+
     """
     x = xn
     if len(x.shape) > 1:
