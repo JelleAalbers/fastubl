@@ -1,5 +1,6 @@
 import numpy as np
 from multihist import poisson_central_interval
+from tqdm import tqdm
 from scipy import stats, optimize
 
 import fastubl
@@ -32,25 +33,46 @@ class OptimalCutPoisson(fastubl.StatisticalProcedure):
 
     def __init__(self, *args,
                  optimize_for_cl=fastubl.DEFAULT_CL,
-                 interval_guess=(0.1, 1.),
+                 method='optimize',
+                 domain=(0., 1.),
                  **kwargs):
         super().__init__(*args, **kwargs)
 
         if np.sum(self.true_mu[1:]) == 0:
-            # No background: include all events
+            # No background: include full range
             self.interval = np.array([-float('inf'), float('inf')])
-        else:
-            # Find interval maximizing mean exclusion limit
+
+        elif method == 'bruteforce':
+            # Find interval maximizing mean exclusion limit by bruteforce
+            x = np.linspace(*domain, num=101)
+            left = np.repeat(x, len(x)).ravel()
+            right = np.tile(x, len(x)).ravel()
+            valid = right > left
+            left, right = left[valid], right[valid]
+            max_i = np.argmin([
+                self.mean_sensitivity((l, r), cl=optimize_for_cl)
+                for l, r in tqdm(zip(left, right),
+                                 total=len(left),
+                                 desc='Bruteforce-optimizing domain')])
+            self.interval = np.asarray([left[max_i], right[max_i]])
+
+        elif method =='optimize':
+            # Find it by optimization
+            # Have you sacrificed to the optimizer gods today?
+            guess = np.asarray(domain)
+            guess[0] += np.diff(guess)/4
+            guess[1] -= np.diff(guess)/4
             optresult = optimize.minimize(
                 self.mean_sensitivity,
-                interval_guess,
-                args=(0, optimize_for_cl))
+                x0=guess,
+                bounds=(domain, domain))
             if not optresult.success:
                 print(
                     f"Optimization failed after {optresult.nfev} iterations! "
                     f"Current value: {optresult.fun}; "
                     f"message: {optresult.message}.\n")
             self.interval = optresult.x
+
         self.fraction_in_interval = self.compute_fraction_in_interval(
             self.interval)
 
@@ -76,7 +98,7 @@ class OptimalCutPoisson(fastubl.StatisticalProcedure):
         # Restricting this too much would make the function discontinuous,
         # and thus hard to optimize.
         # Note the +1, since ppfs both give 0 if mu very small.
-        small_alpha = (1 - cl) / 1000
+        small_alpha = (1 - cl) / 1e4
         n = np.arange(stats.poisson(mu).ppf(small_alpha),
                       stats.poisson(mu).ppf(1 - small_alpha) + 1)
 
