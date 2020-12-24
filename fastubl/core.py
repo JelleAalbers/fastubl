@@ -138,13 +138,14 @@ class StatisticalProcedure:
             return self.compute_ps(x), x, present
         return wrapped
 
-    def toy_data(self, n_trials, batch_size=None, mu_s_true=None):
+    def toy_data(self, n_trials, batch_size=None, mu_s_true=None, toy_maker=None):
         # TODO: make different defaults for different methods
         # And don't let this one behave weirdly
         if batch_size is None:
             batch_size = n_trials
         return list(self.iter_toys(n_trials,
                                    progress=False,
+                                   toy_maker=toy_maker,
                                    batch_size=batch_size,
                                    mu_s_true=mu_s_true))[0]
 
@@ -197,7 +198,7 @@ class StatisticalProcedure:
                       cl=DEFAULT_CL,
                       n_trials=int(2e4),
                       batch_size=DEFAULT_BATCH_SIZE,
-                      progress=True,
+                      progress=False,
                       desc=None,
                       mu_s_true=None,
                       toy_maker=None):
@@ -221,11 +222,6 @@ class StatisticalProcedure:
 
     def compute_intervals(self, r, kind, cl):
         raise NotImplementedError
-
-
-@export
-class DummyProcedure(StatisticalProcedure):
-    pass
 
 
 @export
@@ -269,6 +265,7 @@ class RegularProcedure(StatisticalProcedure):
         elif kind in ('abs_unified', 'feldman_cousins', 'fc'):
             # Feldman cousins: for every mu, include lowest absolute t values
             # => boundary is a high percentile
+            # TODO: test!
             is_included = ts <= self.t_ppf(cl, abs=True)[:, np.newaxis]
         else:
             raise NotImplementedError(f"Unsupporterd kind '{kind}'")
@@ -300,9 +297,9 @@ class RegularProcedure(StatisticalProcedure):
             batch_size=DEFAULT_BATCH_SIZE,
             mu_s_true=None,
             mu_null=None,
-            progress=True,
+            progress=False,
             toy_maker=None):
-        """Return (test statistic, dict with arrays of bonus info) for n_trials toy MCs.
+        """Return (test statistic) array for n_trials toy MCs.
         :param batch_size: Number of toy MCs to optimize at once.
         :param mu_s_true: True signal rate.
         :param mu_null: Null hypothesis to test. Default is true signal rate.

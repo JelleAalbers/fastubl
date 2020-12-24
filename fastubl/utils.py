@@ -4,6 +4,7 @@ import json
 
 import numba
 import numpy as np
+from scipy import stats
 
 def exporter(export_self=False):
     """Export utility modified from https://stackoverflow.com/a/41895194
@@ -118,3 +119,21 @@ def deterministic_hash(thing, length=10):
     jsonned = json.dumps(hashable, cls=NumpyJSONEncoder)
     digest = sha1(jsonned.encode('ascii')).digest()
     return b32encode(digest)[:length].decode('ascii').lower()
+
+
+@export
+def binom_interval(success, total, cl=0.6826895):
+    """Confidence interval on binomial - using Jeffreys interval
+    Code stolen from https://gist.github.com/paulgb/6627336
+    Agrees with http://statpages.info/confint.html for binom_interval(1, 10)
+    """
+    # TODO: special case for success = 0 or = total? see wikipedia
+    quantile = (1 - cl) / 2.
+    lower = stats.beta.ppf(quantile, success, total - success + 1)
+    upper = stats.beta.ppf(1 - quantile, success + 1, total - success)
+    # If something went wrong with a limit calculation, report the trivial limit
+    if np.isnan(lower):
+        lower = 0
+    if np.isnan(upper):
+        upper = 1
+    return lower, upper

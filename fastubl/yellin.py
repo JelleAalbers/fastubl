@@ -128,6 +128,7 @@ class OptItv(fastubl.NeymanConstruction):
             max_n,
             self.trials_per_s))
 
+        # TODO: need more trials here?
         for mu_i, mu_s in enumerate(tqdm(
                 self.mu_s_grid,
                 desc='MC for interval size lookup table')):
@@ -160,7 +161,7 @@ class OptItv(fastubl.NeymanConstruction):
 
         # highest cdf_size -> least indication of excess
         # (We have to flip sign for our Neyman code, just like c0 and pmax)
-        return -np.max(cdf_size, axis=1)  # TODO ?????????
+        return -np.max(cdf_size, axis=1)
 
 
 @export

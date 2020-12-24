@@ -22,7 +22,6 @@ class Poisson(fastubl.StatisticalProcedure):
                     for x in poisson_central_interval(n, cl=cl)]
         raise NotImplementedError(kind)
 
-
 @export
 class OptimalCutPoisson(fastubl.StatisticalProcedure):
     """Poisson upper limit, computed on a pre-determined restricted interval,
