@@ -8,13 +8,18 @@ import fastubl
 export, __all__ = fastubl.utils.exporter()
 
 
-def add_interval_sizes(r, cdf):
+def add_interval_sizes(r, cdf, clear=False):
     """
 
     :param r:
     :param cdf:
     :return:
     """
+    if clear:
+        if 'sizes' in r:
+            del r['sizes']
+        if 'skips' in r:
+            del r['skips']
     if 'sizes' not in r:
         xn = fastubl.yellin_normalize(r['x_obs'], r['present'], cdf)
         r['sizes'], r['skips'] = fastubl.k_largest(xn)
@@ -108,6 +113,48 @@ class PMax(fastubl.NeymanConstruction):
         # to use the regular interval setting code.
         # Logging seems nice anyway
         return -np.log(np.maximum(pmax, 1.e-9))
+
+
+@export
+class PMaxYellin(fastubl.NeymanConstruction):
+
+    def statistic(self, r, mu_null):
+        # NB: using -log(pmax)
+
+        if len(self.dists) > 1:
+            mu_all = np.concatenate([[mu_null], self.true_mu[1:]])
+
+            # Distribution of signal + background
+            # This depends on mu_null!
+            def sum_cdf(x):
+                return np.stack([mu * dist.cdf(x)
+                                 for mu, dist in zip(mu_all, self.dists)],
+                                axis=-1).sum(axis=-1) / mu_all.sum()
+            add_interval_sizes(r, sum_cdf, clear=True)
+
+        else:
+            # No known background: equivalent to Neyman pmax
+            mu_all = np.array([mu_null,])
+            add_interval_sizes(r, self.dists[0].cdf)
+
+        # P(more events in random interval of size)
+        # Note the mu is the *total* mu now
+        p_more_events = stats.poisson(mu_all.sum() * r['sizes']).sf(
+            np.arange(r['sizes'].shape[1])[np.newaxis,:])
+        pmax = p_more_events.max(axis=1)
+
+        # Excesses give low pmax, so we need to invert (or sign-flip)
+        # to use the regular interval setting code.
+        # Logging seems nice anyway
+        return -np.log(np.maximum(pmax, 1.e-9))
+
+    # def compute_intervals(self,
+    #                       r,
+    #                       cl=fastubl.DEFAULT_CL,
+    #                       kind=fastubl.DEFAULT_KIND):
+    #     lower, upper = self.compute_intervals(r, cl, kind)
+    #     # Subtract the background mean
+    #     lower -= se
 
 
 @export
