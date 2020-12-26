@@ -225,6 +225,11 @@ class StatisticalProcedure:
 
 
 @export
+class DummyProcedure(StatisticalProcedure):
+    pass
+
+
+@export
 class RegularProcedure(StatisticalProcedure):
     """Procedure using a statistic
      - for which higher values indicate excesses,

@@ -119,8 +119,7 @@ class OptItv(fastubl.NeymanConstruction):
 
     def do_neyman_construction(self):
         # Largest events per interval to consider
-        # TODO: currently we crash if this is exceeded in simulation
-        max_n = 5 + int(stats.poisson(self.mu_s_grid[-1] + self.true_mu[1:].sum()).ppf(.99999))
+        max_n = 5 + int(stats.poisson(self.mu_s_grid[-1] + self.true_mu[1:].sum()).ppf(.9999))
 
         # Default is 1, since size largest interval with huge n is 1
         self.sizes_mc = np.ones((
@@ -143,9 +142,14 @@ class OptItv(fastubl.NeymanConstruction):
         add_interval_sizes(r, self.dists[0].cdf)
 
         mu_i = np.searchsorted(self.mu_s_grid, mu_null)
+        n_trials, max_n = r['sizes'].shape
+
+        # We can't compute P for sizes we haven't MC'ed.
+        # No matter how large we make max_n in the MC, higher ns
+        # will occur if unknown backgrounds are large enough.
+        max_n = min(max_n, self.sizes_mc.shape[1] - 1)
 
         # Compute P(size_n < observed| mu)
-        n_trials, max_n = r['sizes'].shape
         cdf_size = np.zeros((n_trials, max_n))
         # TODO: faster way? np.searchsorted has no axis argument...
         # TODO: maybe numba helps?
