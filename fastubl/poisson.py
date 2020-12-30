@@ -42,6 +42,7 @@ class OptimalCutPoisson(fastubl.StatisticalProcedure):
             self.interval = np.array([-float('inf'), float('inf')])
 
         elif method == 'bruteforce':
+            print("Got weird results with this at some point, check!")
             # Find interval maximizing mean exclusion limit by bruteforce
             x = np.linspace(*domain, num=101)
             left = np.repeat(x, len(x)).ravel()

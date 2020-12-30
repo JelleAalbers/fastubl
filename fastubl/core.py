@@ -116,16 +116,6 @@ class StatisticalProcedure:
             p_obs[:, :, i] = dist.pdf(x)
         return p_obs
 
-    def _mu_array(self, mu_s):
-        """Return (trials, sources) array of expected events for all sources
-        """
-        assert isinstance(mu_s, np.ndarray)
-        n_trials = mu_s.size
-        mu_bg = (np.array(self.true_mu[1:])[np.newaxis, :]
-                 * np.ones((n_trials, 1)))
-        mu_s = mu_s.reshape(-1, 1)
-        return np.concatenate([mu_s, mu_bg], axis=1)
-
     def _wrap_toy_maker(self, toy_maker):
         if toy_maker is None:
             return self.make_toys

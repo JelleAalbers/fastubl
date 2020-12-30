@@ -1,5 +1,7 @@
+from functools import partial
+
 import numpy as np
-from scipy import optimize, interpolate, special, stats
+from scipy import stats
 from tqdm import tqdm
 
 import fastubl
@@ -8,139 +10,81 @@ import fastubl
 export, __all__ = fastubl.utils.exporter()
 
 
-def add_interval_sizes(r, cdf, clear=False):
-    """
+class YellinMethod(fastubl.NeymanConstruction):
+    include_background = False
 
-    :param r:
-    :param cdf:
-    :return:
-    """
-    if clear:
-        if 'sizes' in r:
-            del r['sizes']
-        if 'skips' in r:
-            del r['skips']
-    if 'sizes' not in r:
-        xn = fastubl.yellin_normalize(r['x_obs'], r['present'], cdf)
-        r['sizes'], r['skips'] = fastubl.k_largest(xn)
+    # TODO: use fact that Neyman construction doesn't depend on dist shapes
+    # for include_background = True, have to subtract mu_b if using the same
+    # Neyman table. (check this is correct first)
+    # In optitv, make sure sizes_mc table uses total events as index
 
+    def statistic(self, r, mu_null):
+        raise NotImplementedError
 
-@export
-class MaxGap(fastubl.StatisticalProcedure):
-
-    _limit_loglog_curves = None
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._limit_loglog_curves = dict()
-
-    def compute_intervals(self, r, *, kind, cl, **kwargs):
-        g, _ = self.max_gap(r)
-
-        if kind == 'upper':
-            ul = 10 ** self.limit_loglog_curve(cl)(np.log10(g))
-            # TODO: Why is Poisson clipping needed? Interpolation trouble?
-            ul = np.clip(ul, fastubl.poisson_ul(0), None)
-            return np.zeros(r['n_trials']), ul
+    def mu_all(self, mu_s):
+        """Return (n_sources) array of expected events
+        :param mu_s: Expected signal events, float
+        """
+        if mu_s is None:
+            mu_s = self.true_mu[0]
+        if len(self.dists) == 1:
+            return np.array([mu_s, ])
         else:
-            raise NotImplementedError(kind)
+            return np.concatenate([[mu_s], self.true_mu[1:]])
 
-    def max_gap(self, r):
-        """Return (gap sizes, skip_events) of maximum gap
-        indices are in sorted version of r['x'], with non-present events removed
+    def sum_cdf(self, x, mu_null):
+        """Return cdf of all sources combined
+        :param x: Observed x, array (arbitrary shape)
+        :param mu_null: Hypothesized expected signal events
         """
-        add_interval_sizes(r, self.dists[0].cdf)
-        return r['sizes'][..., 0], r['skips'][..., 0]
+        mu_all = self.mu_all(mu_null)
+        sum_cdf = np.stack(
+            [mu * dist.cdf(x)
+             for mu, dist in zip(mu_all, self.dists)],
+            axis=-1).sum(axis=-1) / mu_all.sum()
+        return sum_cdf
 
-    def limit_loglog_curve(self, cl):
-        if cl not in self._limit_loglog_curves:
-            # compute exact values for reasonable N
-            mus = self.mu_s_grid
-            critical_values = np.clip(
-                [optimize.brentq(lambda x: self.p_maxgap(x, mu) - cl, 0, mus[-1])
-                 for mu in mus],
-                0, 1)
-            # Use interpolation in the reasonable range, extrapolation outside
-            self._limit_loglog_curves[cl] = interpolate.interp1d(
-                np.log10(critical_values),
-                np.log10(mus),
-                fill_value='extrapolate')
-        return self._limit_loglog_curves[cl]
-
-    @staticmethod
-    def p_maxgap(x, mu):
-        """Probability of observing a smaller gap than x if mu events expected
-        From Yellin's paper
-
-        You will get overflow errors for mu > 1000
+    def get_k_largest(self, r, mu_null=None):
+        """Return (sizes, skip indices) of k-largest intervals
+        :param r: result dict
+        :param mu_null: Expected signal events under test
+        :return: (sizes, skips), both nd arrays. See fastubl.k_largest for details.
         """
-        if x == 0:
-            return 0
-        if x == 1:
-            # TODO HACK...
-            x = 1 - 1e-10
+        if self.include_background and len(self.dists) > 1:
+            # Use the sum of the signal and background
+            # This changes shape depending on mu_null.
+            cdf = partial(self.sum_cdf, mu_null=mu_null)
+            xn = yellin_normalize(r['x_obs'], r['present'], cdf)
+            return k_largest(xn)
 
-        # Yellin's x is mu * our x
-        x *= mu
+        else:
+            # Without considering backgrounds, the interval sizes
+            # are the same for all mu_null.
+            # Cache them in a key in r.
+            if 'k_largest' not in r:
+                cdf = self.dists[0].cdf
+                xn = yellin_normalize(r['x_obs'], r['present'], cdf)
+                r['k_largest'] = k_largest(xn)
 
-        m = int(mu / x)
-
-        # Yellin's formula gives zero division errors
-        # I guess <- in his eq. 2 should really be < ?
-        if mu - m * x == 0:
-            m -= 1
-
-        return sum([(k * x - mu) ** k
-                    * np.exp(-k * x) / special.factorial(k)
-                    * (1 + k / (mu - k * x))
-                    for k in range(m + 1)])
+            return r['k_largest']
 
 
 @export
-class PMax(fastubl.NeymanConstruction):
+class PMax(YellinMethod):
 
     def statistic(self, r, mu_null):
         # NB: using -log(pmax)
 
-        add_interval_sizes(r, self.dists[0].cdf)
+        sizes, _ = self.get_k_largest(r, mu_null)
 
-        # P(more events in random interval of size):
-        p_more_events = stats.poisson(mu_null * r['sizes']).sf(
-            np.arange(r['sizes'].shape[1])[np.newaxis,:])
-        pmax = p_more_events.max(axis=1)
-
-        # Excesses give low pmax, so we need to invert (or sign-flip)
-        # to use the regular interval setting code.
-        # Logging seems nice anyway
-        return -np.log(np.maximum(pmax, 1.e-9))
-
-
-@export
-class PMaxYellin(fastubl.NeymanConstruction):
-
-    def statistic(self, r, mu_null):
-        # NB: using -log(pmax)
-
-        if len(self.dists) > 1:
-            mu_all = np.concatenate([[mu_null], self.true_mu[1:]])
-
-            # Distribution of signal + background
-            # This depends on mu_null!
-            def sum_cdf(x):
-                return np.stack([mu * dist.cdf(x)
-                                 for mu, dist in zip(mu_all, self.dists)],
-                                axis=-1).sum(axis=-1) / mu_all.sum()
-            add_interval_sizes(r, sum_cdf, clear=True)
-
-        else:
-            # No known background: equivalent to Neyman pmax
-            mu_all = np.array([mu_null,])
-            add_interval_sizes(r, self.dists[0].cdf)
+        total_events = (self.mu_all(mu_null).sum()
+                        if self.include_background
+                        else mu_null)
 
         # P(more events in random interval of size)
-        # Note the mu is the *total* mu now
-        p_more_events = stats.poisson(mu_all.sum() * r['sizes']).sf(
-            np.arange(r['sizes'].shape[1])[np.newaxis,:])
+        n_in_interval = np.arange(sizes.shape[1])[np.newaxis,:]
+        p_more_events = stats.poisson(sizes * total_events).sf(n_in_interval)
+
         pmax = p_more_events.max(axis=1)
 
         # Excesses give low pmax, so we need to invert (or sign-flip)
@@ -148,17 +92,14 @@ class PMaxYellin(fastubl.NeymanConstruction):
         # Logging seems nice anyway
         return -np.log(np.maximum(pmax, 1.e-9))
 
-    # def compute_intervals(self,
-    #                       r,
-    #                       cl=fastubl.DEFAULT_CL,
-    #                       kind=fastubl.DEFAULT_KIND):
-    #     lower, upper = self.compute_intervals(r, cl, kind)
-    #     # Subtract the background mean
-    #     lower -= se
+
+@export
+class PMaxYellin(PMax):
+    include_background = True
 
 
 @export
-class OptItv(fastubl.NeymanConstruction):
+class OptItv(YellinMethod):
     max_n: int
     sizes_mc : np.ndarray  # (mu, max_n, mc_trials)
 
@@ -166,7 +107,9 @@ class OptItv(fastubl.NeymanConstruction):
 
     def do_neyman_construction(self):
         # Largest events per interval to consider
-        max_n = 5 + int(stats.poisson(self.mu_s_grid[-1] + self.true_mu[1:].sum()).ppf(.9999))
+        max_n = 5 + int(stats.poisson(
+            self.mu_s_grid[-1]
+            + self.true_mu[1:].sum()).ppf(.9999))
 
         # Default is 1, since size largest interval with huge n is 1
         self.sizes_mc = np.ones((
@@ -179,17 +122,17 @@ class OptItv(fastubl.NeymanConstruction):
                 self.mu_s_grid,
                 desc='MC for interval size lookup table')):
             r = self.toy_data(self.trials_per_s, mu_s_true=mu_s)
-            add_interval_sizes(r, self.dists[0].cdf)
-            self.sizes_mc[mu_i,:r['sizes'].shape[1],:] = r['sizes'].T
+            sizes, _ = self.get_k_largest(r, mu_null=mu_s)
+            self.sizes_mc[mu_i,:sizes.shape[1],:] = sizes.T
         self.sizes_mc.sort(axis=2)
 
         super().do_neyman_construction()
 
     def statistic(self, r, mu_null):
-        add_interval_sizes(r, self.dists[0].cdf)
+        sizes, _ = self.get_k_largest(r, mu_null)
 
         mu_i = np.searchsorted(self.mu_s_grid, mu_null)
-        n_trials, max_n = r['sizes'].shape
+        n_trials, max_n = sizes.shape
 
         # We can't compute P for sizes we haven't MC'ed.
         # No matter how large we make max_n in the MC, higher ns
@@ -204,7 +147,7 @@ class OptItv(fastubl.NeymanConstruction):
             # P(size_n < observed| mu)
             # i.e. P that the n-interval is 'smaller' (has fewer events expected)
             # Excess -> small intervals -> small ps
-            p = np.searchsorted(self.sizes_mc[mu_i, n], r['sizes'][:,n]) / self.trials_per_s
+            p = np.searchsorted(self.sizes_mc[mu_i, n], sizes[:,n]) / self.trials_per_s
             cdf_size[:, n] = p.clip(0, 1)
 
         # Find optimum interval n (for this mu)
@@ -213,6 +156,11 @@ class OptItv(fastubl.NeymanConstruction):
         # highest cdf_size -> least indication of excess
         # (We have to flip sign for our Neyman code, just like c0 and pmax)
         return -np.max(cdf_size, axis=1)
+
+
+@export
+class OptItvYellin(OptItv):
+    include_background = True
 
 
 @export
@@ -226,10 +174,8 @@ def k_largest(xn, max_n=None):
 
     For example, sizes[0] gives the expected number of events in the largest observed gap.
 
-    :param xm: Input data, Yellin-normalized, with added 0/1 events.
+    :param xn: Input data, Yellin-normalized, with added 0/1 events.
         The last axis must be the data dimension, earlier axes can run over trials.
-    :param present: presence mask
-    :param cdf: Expected CDF, default is standard uniform
     :param max_n: Maximum event count inside interval to consider.
         Defaults to len(x) - 2, i.e. all events except the fake boundary events\
 

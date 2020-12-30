@@ -47,6 +47,16 @@ class UnbinnedLikelihoodBase:
             p_obs = p_obs / r['acceptance'][:, None, :]
         return log_likelihood(p_obs, present, mus, gradient=gradient)
 
+    def _mu_array(self, mu_s):
+        """Return (trials, sources) array of expected events for all sources
+        """
+        assert isinstance(mu_s, np.ndarray)
+        n_trials = mu_s.size
+        mu_bg = (np.array(self.true_mu[1:])[np.newaxis, :]
+                 * np.ones((n_trials, 1)))
+        mu_s = mu_s.reshape(-1, 1)
+        return np.concatenate([mu_s, mu_bg], axis=1)
+
     def optimize(self, r, guess=None):
         """Return (best-fit signal rate mu_best,
                    likelihood at mu_best)
