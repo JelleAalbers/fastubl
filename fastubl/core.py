@@ -114,6 +114,7 @@ class StatisticalProcedure:
         p_obs = np.zeros(list(x.shape) + [self.n_sources])
         for i, dist in enumerate(self.dists):
             p_obs[:, :, i] = dist.pdf(x)
+        p_obs = np.nan_to_num(p_obs)   # Impossible events have p=0
         return p_obs
 
     def _wrap_toy_maker(self, toy_maker):

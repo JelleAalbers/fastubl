@@ -43,8 +43,12 @@ class UnbinnedLikelihoodBase:
         mus = self._mu_array(mu_signal)   # (trials, sources)
         if 'acceptance' in r:
             mus = mus * r['acceptance']
-            # p_obs increases for lower acceptance (PDF renormalizes)
-            p_obs = p_obs / r['acceptance'][:, None, :]
+            # p_obs increases for lower acceptances (PDF renormalizes)
+            with np.errstate(divide='ignore'):
+                p_obs = p_obs / r['acceptance'][:, None, :]
+            # If acceptances = 0, the zero division can cause odd results
+            # -- but no events are possible, so we set p_obs = 0
+            p_obs[~np.isfinite(p_obs)] = 0
         return log_likelihood(p_obs, present, mus, gradient=gradient)
 
     def _mu_array(self, mu_s):
@@ -78,10 +82,14 @@ class UnbinnedLikelihoodBase:
         minimize_opts = dict(
             x0=guess,
             jac=True,
-            bounds=[(self.mu_s_grid[0], self.mu_s_grid[-1])] * n_trials,)
+            bounds=optimize.Bounds(np.ones(n_trials) * self.mu_s_grid[0],
+                                   np.ones(n_trials) * self.mu_s_grid[-1],
+                                   keep_feasible=True))
 
-        # Optimizers fail sometimes...
-        for method in ('TNC', 'L-BFGS-B', 'Powell'):
+        # Optimizers fail sometimes, so try several methods
+        # (not Powell: it does not use gradients, so it can't handle
+        #  the large # of variables in our objective)
+        for method in ('TNC', 'L-BFGS-B'):
             optresult = optimize.minimize(objective, **minimize_opts,
                                           method=method)
             if optresult.success:
