@@ -1,8 +1,14 @@
 import os
 import pickle
+import typing
+
+try:
+    import blosc
+except ImportError:
+    print("Blosc not installed, falling back to zlib")
+    import zlib as blosc
 
 import matplotlib.pyplot as plt
-
 import numba
 import numpy as np
 from scipy import stats
@@ -317,21 +323,40 @@ class RegularProcedure(StatisticalProcedure):
         return result
 
 
+class PackedArray:
+    dtype: np.dtype
+    shape: typing.Tuple[int]
+    bytes: bytes
+
+    def __init__(self, a):
+        self.dtype = a.dtype
+        self.shape = a.shape
+        self.bytes = blosc.compress(a)
+
+    def asarray(self):
+        return np.frombuffer(blosc.decompress(self.bytes),
+                             dtype=self.dtype).reshape(self.shape)
+
+
 @export
 class NeymanConstruction(RegularProcedure):
 
+    # TODO: store ppfs instead of raw values, to accommodate large n_trials
+
     mc_results : np.ndarray = None   # (mu_s, trial i)
     extra_cache_attributes = tuple()
+    default_trials = 2000
 
     def __init__(self, *args,
                  cache_folder='./fastubl_neyman_cache',
-                 trials_per_s=int(2000),
+                 trials_per_s=None,
                  cache=True,
                  **kwargs):
         super().__init__(*args, **kwargs)
+        if trials_per_s is None:
+            trials_per_s = self.default_trials
         self.trials_per_s = trials_per_s
 
-        # TODO: include extra options with Neyman hash in child classes?
         self.hash = fastubl.deterministic_hash(dict(
             sources=self.sources,
             trials_per_s=self.trials_per_s,
@@ -346,10 +371,16 @@ class NeymanConstruction(RegularProcedure):
             os.makedirs(cache_folder, exist_ok=True)
             if os.path.exists(fn):
                 with open(fn, mode='rb') as f:
-                    stuff = pickle.load(f)
+                    data = f.read()
+                    try:
+                        data = blosc.decompress(data)
+                    except Exception:
+                        # TODO: Old uncompressed pickles -- temp hack...
+                        pass
+                    stuff = pickle.loads(data)
+                    # If any extra keys are stored in the pickle, ignore them
                     for k in self.cache_attributes():
                         setattr(self, k, stuff[k])
-                    # (If any extra keys are stored in the pickle, ignore them)
                 loaded_from_cache = True
 
         if not loaded_from_cache:
@@ -360,13 +391,14 @@ class NeymanConstruction(RegularProcedure):
                 to_cache = {
                     k: getattr(self, k)
                     for k in self.cache_attributes()}
-                pickle.dump(to_cache, f)
+                f.write(blosc.compress(pickle.dumps(to_cache)))
 
     def cache_attributes(self):
         return tuple(['mc_results'] + list(self.extra_cache_attributes))
 
     def do_neyman_construction(self):
-        self.mc_results = np.zeros((self.mu_s_grid.size, self.trials_per_s))
+        self.mc_results = np.zeros((self.mu_s_grid.size, self.trials_per_s),
+                                   dtype=np.float32)
         for i, mu_s in enumerate(tqdm(self.mu_s_grid,
                                       desc='MC for Neyman construction')):
             self.mc_results[i] = \
