@@ -11,6 +11,12 @@ export, __all__ = fastubl.utils.exporter()
 
 
 class YellinMethod(fastubl.NeymanConstruction):
+    # This statistic is much cheaper than likelihood ratios.
+    # You need at least 100_000 trials on a dense mu grid
+    # to get something like Yellin's figure 2.
+    # (std of cmax is about .25 (at high mu))
+    default_trials = 20_000
+
     include_background = False
 
     # TODO: use fact that Neyman construction doesn't depend on dist shapes
@@ -100,31 +106,26 @@ class PMaxYellin(PMax):
 
 @export
 class OptItv(YellinMethod):
-    max_n: int
-    sizes_mc : np.ndarray  # (mu, max_n, mc_trials)
+
+    # It would be very inefficient to store this as a 3d array;
+    # it would be ~90% 1s for a reasonable mu_s_grid.
+    sizes_mc : list  # (mu_i) -> (max_n, mc_trials) arrays
 
     extra_cache_attributes = ('sizes_mc',)
 
     def do_neyman_construction(self):
-        # Largest events per interval to consider
-        max_n = 5 + int(stats.poisson(
-            self.mu_s_grid[-1]
-            + self.true_mu[1:].sum()).ppf(.9999))
+        # TODO: compute P(Cn | n) instead, combine with Poisson for P(Cn | mu)?
+        # -- only useful for Vanilla Yellin, not Neyman variation
 
-        # Default is 1, since size largest interval with huge n is 1
-        self.sizes_mc = np.ones((
-            self.mu_s_grid.size,
-            max_n,
-            self.trials_per_s))
-
-        # TODO: need more trials here?
+        self.sizes_mc = []
         for mu_i, mu_s in enumerate(tqdm(
                 self.mu_s_grid,
                 desc='MC for interval size lookup table')):
             r = self.toy_data(self.trials_per_s, mu_s_true=mu_s)
             sizes, _ = self.get_k_largest(r, mu_null=mu_s)
-            self.sizes_mc[mu_i,:sizes.shape[1],:] = sizes.T
-        self.sizes_mc.sort(axis=2)
+            sizes = sizes.T    # (trials, n_in_interval)   -> (n_in, trials)
+            sizes.sort(axis=-1)
+            self.sizes_mc.append(sizes)
 
         super().do_neyman_construction()
 
@@ -133,11 +134,7 @@ class OptItv(YellinMethod):
 
         mu_i = np.searchsorted(self.mu_s_grid, mu_null)
         n_trials, max_n = sizes.shape
-
-        # We can't compute P for sizes we haven't MC'ed.
-        # No matter how large we make max_n in the MC, higher ns
-        # will occur if unknown backgrounds are large enough.
-        max_n = min(max_n, self.sizes_mc.shape[1] - 1)
+        max_n = min(max_n, self.sizes_mc[mu_i].shape[0] - 1)
 
         # Compute P(size_n < observed| mu)
         cdf_size = np.zeros((n_trials, max_n))
@@ -147,7 +144,7 @@ class OptItv(YellinMethod):
             # P(size_n < observed| mu)
             # i.e. P that the n-interval is 'smaller' (has fewer events expected)
             # Excess -> small intervals -> small ps
-            p = np.searchsorted(self.sizes_mc[mu_i, n], sizes[:,n]) / self.trials_per_s
+            p = np.searchsorted(self.sizes_mc[mu_i][n], sizes[:,n]) / self.trials_per_s
             cdf_size[:, n] = p.clip(0, 1)
 
         # Find optimum interval n (for this mu)
@@ -195,6 +192,7 @@ def k_largest(xn, max_n=None):
     for i in range(sizes.shape[-1]):
         # Compute sizes of gaps with i events in them
         y = x[..., (i + 1):] - x[..., :-(i + 1)]
+        # TODO: maybe clever indexing is faster than two max computations?
         starts[..., i] = np.argmax(y, axis=-1)
         sizes[..., i] = np.max(y, axis=-1)
 
