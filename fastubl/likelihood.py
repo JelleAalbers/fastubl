@@ -44,7 +44,8 @@ class UnbinnedLikelihoodBase:
         if 'acceptance' in r:
             mus = mus * r['acceptance']
             # p_obs increases for lower acceptances (PDF renormalizes)
-            with np.errstate(divide='ignore'):
+            # (/0 non-finiteness is handled below, no need for warning)
+            with np.errstate(all='ignore'):
                 p_obs = p_obs / r['acceptance'][:, None, :]
             # If acceptances = 0, the zero division can cause odd results
             # -- but no events are possible, so we set p_obs = 0

@@ -187,6 +187,8 @@ class StatisticalProcedure:
             yield dict(p_obs=self.compute_ps(x_obs),
                        x_obs=x_obs,
                        present=present,
+                       # Fixed random number per trial, several applications
+                       random_number=np.random.rand(batch_size),
                        n_trials=batch_size)
 
     def toy_intervals(self,

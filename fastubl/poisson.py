@@ -8,6 +8,17 @@ export, __all__ = fastubl.exporter()
 
 
 @export
+def poisson_ul(n, mu_bg=0, cl=fastubl.DEFAULT_CL):
+    """Upper limit on mu_signal, from observing n events
+    where mu_bg background events were expected
+
+    NB: can be negative if mu_bg large enough.
+    It's your responsibility to clip to 0...
+    """
+    return stats.chi2.ppf(cl, 2 * n + 2) / 2 - mu_bg
+
+
+@export
 class Poisson(fastubl.StatisticalProcedure):
 
     def compute_intervals(self, r,
@@ -21,6 +32,19 @@ class Poisson(fastubl.StatisticalProcedure):
             return [x - mu_bg
                     for x in poisson_central_interval(n, cl=cl)]
         raise NotImplementedError(kind)
+
+
+@export
+class RandomizedPoisson(fastubl.NeymanConstruction):
+    # Don't really need a Neyman construction, could interpolate
+    # Poisson result. But it's cheap enough, so...
+
+    default_trials = 10_000
+
+    def statistic(self, r, mu_null):
+        n_observed = r['present'].sum(axis=1)
+        return n_observed + r['random_number']
+
 
 @export
 class OptimalCutPoisson(fastubl.StatisticalProcedure):
@@ -183,14 +207,3 @@ class SacrificialPoisson(fastubl.StatisticalProcedure):
             return [(x - mu_bg)/f_sig
                     for x in poisson_central_interval(n, cl=cl)]
         raise NotImplementedError(kind)
-
-
-@export
-def poisson_ul(n, mu_bg=0, cl=fastubl.DEFAULT_CL):
-    """Upper limit on mu_signal, from observing n events
-    where mu_bg background events were expected
-
-    NB: can be negative if mu_bg large enough.
-    It's your responsibility to clip to 0...
-    """
-    return stats.chi2.ppf(cl, 2 * n + 2) / 2 - mu_bg
