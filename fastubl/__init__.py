@@ -9,5 +9,6 @@ from .likelihood import *
 from .yellin import *
 
 from .region_seeking import *
+from .best_likelihood import *
 
 from .wilks_hist import *
