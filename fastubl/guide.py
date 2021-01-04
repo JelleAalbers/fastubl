@@ -136,7 +136,11 @@ class PoissonGuide(Guide):
         # Note: clip to poisson_uls_flat[0] to avoid
         # attraction to background underfluctuations
         n_limit = n_limit.clip(self.poisson_uls_flat[0], None)
-        return n_limit / acceptance[:, :, 0]
+        with np.errstate(all='ignore'):
+            # 0 acceptance -> no limit on mu (infinity)
+            return np.where(acceptance[:, :, 0] == 0,
+                            float('inf'),
+                            n_limit / acceptance[:, :, 0])
 
 
 @export

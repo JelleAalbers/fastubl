@@ -105,6 +105,26 @@ class PMaxYellin(PMax):
 
 
 @export
+class YMin(YellinMethod):
+
+    def statistic(self, r, mu_null):
+        # NB: using -log(pmax)
+
+        sizes, _ = self.get_k_largest(r, mu_null)
+        n_in_interval = np.arange(sizes.shape[1])[np.newaxis, :]
+
+        y = (n_in_interval - sizes * mu_null)/np.sqrt(sizes * mu_null)
+
+        # Stronger deficits -> lower n | higher size -> lower y_min
+        return y.min(axis=1)
+
+
+@export
+class YMinYellin(YMin):
+    include_background = True
+
+
+@export
 class OptItv(YellinMethod):
 
     # It would be very inefficient to store this as a 3d array;
