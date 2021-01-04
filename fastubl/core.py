@@ -347,7 +347,7 @@ class NeymanConstruction(RegularProcedure):
 
     mc_results : np.ndarray = None   # (mu_s, trial i)
     extra_cache_attributes = tuple()
-    default_trials = 2000
+    default_trials = 5000
 
     def __init__(self, *args,
                  cache_folder='./fastubl_neyman_cache',

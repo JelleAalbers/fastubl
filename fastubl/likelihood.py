@@ -6,6 +6,24 @@ import fastubl
 export, __all__ = fastubl.exporter()
 
 
+@export
+def wilks_t_ppf(cl, abs=False):
+    if abs:
+        # For unsigned LR
+        return stats.chi2(1).ppf(cl)
+    else:
+        # Signed LR
+        # TODO: justify in a comment here
+        return stats.norm.ppf(cl) ** 2 * np.sign(cl - 0.5)
+
+
+@export
+def wilks_t_cdf(t, abs=False):
+    if abs:
+        return stats.chi2(1).cdf(t)
+    else:
+        return (1 - np.sign(t)) / 2 + np.sign(t) * stats.norm.cdf(np.abs(t) ** 0.5)
+
 
 @export
 class UnbinnedLikelihoodBase:
@@ -18,13 +36,13 @@ class UnbinnedLikelihoodBase:
             r['mu_best'], r['ll_best'] = \
                 self.optimize(r, guess=np.clip(mu_null, 1, None))
 
-        lr = - 2 * (ll_null - r['ll_best'])
+        ts = - 2 * (ll_null - r['ll_best'])
 
-        # 'Sign' the likelihood ratio so deficits (mu_best < mu_null)
+        # Choose the sign so that deficits (mu_best < mu_null)
         # give negative ts, and we can use the usual percentile-based
         # interval setting code
-        lr *= np.sign(r['mu_best'] - mu_null)
-        return lr
+        ts *= np.sign(r['mu_best'] - mu_null)
+        return ts
 
     def ll(self, mu_signal, r, gradient=False):
         """Return array of log likelihoods for toys at mu_signal
@@ -50,7 +68,9 @@ class UnbinnedLikelihoodBase:
             # If acceptances = 0, the zero division can cause odd results
             # -- but no events are possible, so we set p_obs = 0
             p_obs[~np.isfinite(p_obs)] = 0
-        return log_likelihood(p_obs, present, mus, gradient=gradient)
+        return log_likelihood(p_obs, present, mus,
+                              weights=r.get('weights'),
+                              gradient=gradient)
 
     def _mu_array(self, mu_s):
         """Return (trials, sources) array of expected events for all sources
@@ -106,6 +126,23 @@ class UnbinnedLikelihoodBase:
 
 
 @export
+class TemperedLikelihoodBase(UnbinnedLikelihoodBase):
+
+    def ll(self, mu_signal, r, gradient=False):
+        result = super().ll(mu_signal, r, gradient=gradient)
+
+        _rand = r['random_number'] - 0.5
+        extra = np.log(mu_signal) * _rand
+
+        if gradient:
+            ll, grad = result
+            extra_grad = _rand / mu_signal
+            return ll + extra, grad + extra_grad
+        else:
+            return result + extra
+
+
+@export
 class UnbinnedLikelihoodExact(UnbinnedLikelihoodBase,
                               fastubl.NeymanConstruction):
     pass
@@ -115,26 +152,33 @@ class UnbinnedLikelihoodExact(UnbinnedLikelihoodBase,
 class UnbinnedLikelihoodWilks(UnbinnedLikelihoodBase,
                               fastubl.RegularProcedure):
 
-    def t_ppf(self,
-              cl=fastubl.DEFAULT_CL,
-              abs=False):
-        if abs:
-            # For unsigned LR
-            critical_ts = stats.chi2(1).ppf(cl)
-        else:
-            # Signed LR
-            # TODO: justify in a comment here
-            critical_ts = stats.norm.ppf(cl)**2 * np.sign(cl - 0.5)
-        return np.ones(len(self.mu_s_grid)) * critical_ts
+    def t_ppf(self, cl=fastubl.DEFAULT_CL, abs=False):
+        return np.ones(self.mu_s_grid.size) * wilks_t_ppf(cl, abs)
 
 
 @export
-def log_likelihood(p_obs, present, mus, gradient=True):
+class TemperedLikelihoodExact(TemperedLikelihoodBase,
+                              fastubl.NeymanConstruction):
+    pass
+
+
+@export
+class TemperedLikelihoodWilks(TemperedLikelihoodBase,
+                              fastubl.RegularProcedure):
+
+    def t_ppf(self, cl=fastubl.DEFAULT_CL, abs=False):
+        return np.ones(self.mu_s_grid.size) * wilks_t_ppf(cl, abs)
+
+
+@export
+def log_likelihood(p_obs, present, mus, weights=None, gradient=True):
     """Compute log likelihood
 
     :param p_obs: P(event | source), (trials, events, sources) array
     :param present: whether event is real, (trials, events) array
     :param mus: applicable mus, (trials, sources) array
+    :param weights: (trials, events) array of weights for events.
+        If not specified, assumed all one.
     :param gradient: If True, instead return (ll, grad) tuple
         of arrays. Second element is derivative of ll with respect
         to mu_signal.
@@ -150,6 +194,11 @@ def log_likelihood(p_obs, present, mus, gradient=True):
     # This avoids floating-point warnings/errors
     # inner_term must always be multiplied by present!
     inner_term[~present] = 1
+
+    if weights is not None:
+        # Weights enters algebraically just like present
+        # (except that it's a float, not a bool)
+        present = weights * present
 
     ll = (-mus.sum(axis=1) + np.sum(
         special.xlogy(present, inner_term),

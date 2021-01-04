@@ -5,6 +5,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 from scipy import stats
 
+import fastubl
+
 __all__ = ['wilks_hist']
 
 
@@ -14,13 +16,12 @@ default_percentiles = (
     (100 * (1 - stats.norm.cdf(-2)), '2$\sigma$'),
     (100 * (1 - stats.norm.cdf(-3)), '3$\sigma$'))
 
-default_bins = np.linspace(-1, 15, 100)
-
 theory_colors = dict(wilks='darkorange',
                      chernoff='seagreen')
 
 def wilks_hist(result, bins=None,
                show_percentiles=None,
+               signed=False,
                show_theory=('wilks',)):
     if show_percentiles is None:
         show_percentiles = default_percentiles
@@ -31,7 +32,10 @@ def wilks_hist(result, bins=None,
         show_theory = (show_theory,)
 
     if bins is None:
-        bins = default_bins
+        if signed:
+            bins = np.linspace(-15, 15, 100)
+        else:
+            bins = np.linspace(-1, 15, 100)
 
     h = Hist1d(result, bins=bins)
     x = h.bin_centers
@@ -39,11 +43,9 @@ def wilks_hist(result, bins=None,
     plt.fill_between(x, y - y ** 0.5, y + y ** 0.5,
                      color='b', label='Simulation',
                      alpha=0.4, step='mid', linewidth=0)
-    plt.plot(x, y, linestyle='steps-mid', color='b', linewidth=0.5)
+    plt.plot(x, y, drawstyle='steps-mid', color='b', linewidth=0.5)
 
-    wilks_dist = stats.chi2(1)
-
-    wilks_y = np.diff(wilks_dist.cdf(bins)) * h.n
+    wilks_y = np.diff(fastubl.wilks_t_cdf(bins, abs=not signed)) * h.n
     chernoff_y0 = (lookup(0, x, wilks_y) + h.n) / 2
 
     if 'wilks' in show_theory:
@@ -91,7 +93,7 @@ def wilks_hist(result, bins=None,
         pc_line(x, y, label=label, color='k', alpha=1)
 
         if 'wilks' in show_theory:
-            x = wilks_dist.ppf(pc / 100)
+            x = fastubl.wilks_t_ppf(pc / 100, abs=not signed)
             y = lookup(x, h.bin_centers, wilks_y)
             pc_line(x, y, color=theory_colors['wilks'])
 
@@ -100,10 +102,11 @@ def wilks_hist(result, bins=None,
                 x = 0
                 y = chernoff_y0
             else:
-                x = wilks_dist.ppf(1 - 2 * (1 - pc/100))
+                x = fastubl.wilks_t_ppf(1 - 2 * (1 - pc/100), abs=not signed)
                 y = lookup(x, h.bin_centers, wilks_y) / 2
             pc_line(x, y, color=theory_colors['chernoff'])
 
 
 def lookup(x, xp, yp):
+    # TODO: use searchsorted instead?
     return yp[np.argmin(np.abs(x - xp))]
