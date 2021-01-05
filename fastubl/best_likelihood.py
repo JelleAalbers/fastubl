@@ -19,8 +19,9 @@ class BestLikelihood(fastubl.NeymanConstruction):
         # Compute (trial, interval) array of ts
         # itv_ll: (trial, interval, mu) array
         # itv_mu_best and itv_ll_best: (trial, interval) arrays
-        ts = -2 * np.sign(r['itv_mu_best'] - mu_null) * \
-             (r['itv_ll'][:,:,mu_i] - r['itv_ll_best'])
+        ts = (-2
+              * np.sign(r['itv_mu_best'] - mu_null)
+              * r['itv_llr'][:,:,mu_i])
 
         # Low t -> strong deficit. Want minimum t across intervals
         return ts.min(axis=1)
@@ -75,9 +76,12 @@ class BestLikelihood(fastubl.NeymanConstruction):
         assert len(acceptance.shape) == 3
 
         # Compute grid of mus for all hypotheses (mu_i, source)
-        # Add one hypothesis beyond self.mu_s_grid;
+        # Add a few hypotheses higher than self.mu_s_grid;
         # without this t for final mu would often be 0
-        mu_s_grid = np.concatenate([self.mu_s_grid, [self.mu_s_grid[-1] + 1]])
+        # TODO: Do we need as many as 10? We're looking at sparse intervals
+        mu_s_grid = np.concatenate([
+            self.mu_s_grid,
+            self.mu_s_grid[-1] * np.geomspace(1.1, 10, 10)])
         n_mus = mu_s_grid.size
         mu_grid = np.concatenate([
             mu_s_grid[:,None],
@@ -118,9 +122,12 @@ class BestLikelihood(fastubl.NeymanConstruction):
         assert r['itv_ll'].shape == (n_trials, n_intervals, n_mus)
 
         # Find best mu in each interval
+        # (trial, interval) array
         # TODO: fancy indexing might beat doing min twice
-        r['itv_mu_best'] = mu_s_grid[np.argmin(r['itv_ll'], axis=2)]
-        r['itv_ll_best'] = np.min(r['itv_ll'], axis=2)
+        r['itv_mu_best'] = mu_s_grid[np.argmax(r['itv_ll'], axis=2)]
+        r['itv_ll_best'] = np.max(r['itv_ll'], axis=2)
+
+        r['itv_llr'] = r['itv_ll'] - r['itv_ll_best'][:,:,None]
 
         # For diagnosis/inspection
         r['left'], r['right'] = left, right
