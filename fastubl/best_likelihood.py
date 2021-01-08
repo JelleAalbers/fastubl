@@ -1,9 +1,44 @@
 import numpy as np
-from scipy import special
+from scipy import special, stats
 
 import fastubl
 
 export, __all__ = fastubl.exporter()
+
+
+@export
+class BestZech(fastubl.NeymanConstruction):
+
+    def statistic(self, r, mu_null):
+        if 'p_fewer_0' not in r:
+            r['p_fewer_0'] = self.p_fewer(r, 0)
+
+        # p(fewer events): high value = excess, so take min over intervals
+        return np.min(self.p_fewer(r, mu_null) / r['p_fewer_0'],
+                      axis=1)
+
+    def p_fewer(self, r, mu_signal):
+        x_obs, p_obs, present = r['x_obs'], r['p_obs'], r['present']
+        assert x_obs.shape == present.shape
+        n_trials, n_max_events, n_sources = p_obs.shape
+
+        x_obs = add_fake_and_sort(x_obs, present, p_obs, only_x=True)
+        n_endpoints = n_max_events + 2
+
+        left, right = interval_indices(n_endpoints)
+        acceptance = interval_acceptances(x_obs, left, right, self.dists)
+
+        # TODO: this should be factored out, it's done elsewhere
+        mu = self.true_mu.copy()
+        mu[0] = mu_signal
+
+        # Get (trials, intervals) array of total mu
+        mu_total = (mu[None,None,:] * acceptance).sum(axis=2)
+
+        # (intervals) array of observed events in interval
+        n_observed = right - left - 1  # If right 1 bigger than left, 0 observed
+
+        return stats.poisson(mu_total).cdf(n_observed[None,:])
 
 
 @export
@@ -31,49 +66,14 @@ class BestLikelihood(fastubl.NeymanConstruction):
         """
         x_obs, p_obs, present = r['x_obs'], r['p_obs'], r['present']
         assert x_obs.shape == present.shape
-        n_events = present.sum(axis=1)
-        n_sources = p_obs.shape[2]
+        n_trials, n_max_events, n_sources = p_obs.shape
 
-        # (Code below is similar to 'Yellin normalize' in yellin.py)
+        x_obs, p_obs, present = add_fake_and_sort(x_obs, present, p_obs)
+        n_endpoints = n_max_events + 2
 
-        # Map fake events to inf, where they won't affect the method.
-        x = np.where(present, x_obs, float('inf'))
-        # Sort by ascending x values
-        x, p_obs, present = fastubl.sort_all_by_axis1(x, p_obs, present)
-        # add fake events at(-inf, inf)
-        n_trials = x.shape[0]
-        x = np.concatenate([-np.ones((n_trials, 1)) * float('inf'),
-                            x,
-                            np.ones((n_trials, 1)) * float('inf')],
-                           axis=1)
-        n_endpoints = n_events.max() + 2
-
-        # Add p_obs and present for fake events
-        p_obs = np.concatenate([np.ones((n_trials, 1, n_sources)),
-                                p_obs,
-                                np.ones((n_trials, 1, n_sources))],
-                               axis=1)
-        present = np.concatenate([np.zeros((n_trials, 1), dtype=np.bool_),
-                                  present,
-                                  np.zeros((n_trials, 1), dtype=np.bool_)],
-                                 axis=1)
-
-        # Get matrices of (left, right) indices of all intervals.
-        # With the addition of two 'events' at the bounds, we have nmax+2 valid
-        # indices to consider.
-        # left indices change quickly, right indices repeat before changing.
-        left, right = np.meshgrid(np.arange(n_endpoints),
-                                  np.arange(n_endpoints))
-        left, right = left.ravel(), right.ravel()
-        valid = right > left
-        left, right = left[valid], right[valid]
+        left, right = interval_indices(n_endpoints)
         n_intervals = left.size
-
-        # Find acceptances (fraction of surviving events) of each interval
-        # (trial, interval, source)
-        _cdfs = np.stack([dist.cdf(x) for dist in self.dists], axis=2)
-        acceptance = _cdfs[:, right, :] - _cdfs[:, left, :]
-        assert len(acceptance.shape) == 3
+        acceptance = interval_acceptances(x_obs, left, right, self.dists)
 
         # Compute grid of mus for all hypotheses (mu_i, source)
         # Add a few hypotheses higher than self.mu_s_grid;
@@ -131,3 +131,54 @@ class BestLikelihood(fastubl.NeymanConstruction):
 
         # For diagnosis/inspection
         r['left'], r['right'] = left, right
+
+
+
+def add_fake_and_sort(x_obs, present, p_obs, only_x=False):
+    n_trials, n_max_events, n_sources = p_obs.shape
+
+    # Map fake events to inf, where they won't affect the method.
+    x = np.where(present, x_obs, float('inf'))
+    # Sort by ascending x values
+    x, p_obs, present = fastubl.sort_all_by_axis1(x, p_obs, present)
+    # add fake events at(-inf, inf)
+    x = np.concatenate([-np.ones((n_trials, 1)) * float('inf'),
+                        x,
+                        np.ones((n_trials, 1)) * float('inf')],
+                       axis=1)
+
+    if only_x:
+        return x
+
+    # Add p_obs and present for fake events
+    p_obs = np.concatenate([np.ones((n_trials, 1, n_sources)),
+                            p_obs,
+                            np.ones((n_trials, 1, n_sources))],
+                           axis=1)
+    present = np.concatenate([np.zeros((n_trials, 1), dtype=np.bool_),
+                              present,
+                              np.zeros((n_trials, 1), dtype=np.bool_)],
+                             axis=1)
+    return x, present, p_obs
+
+def interval_indices(n_endpoints):
+    """Return (left, right) index array of all valid intervals
+    :param n_endpoints: number of 'bin edges' / interval endpoints
+    :return: tuple of integer ndarrays, right > left
+    """
+    # left indices change quickly, right indices repeat before changing.
+    left, right = np.meshgrid(np.arange(n_endpoints),
+                              np.arange(n_endpoints))
+    left, right = left.ravel(), right.ravel()
+    valid = right > left
+    return left[valid], right[valid]
+
+
+def interval_acceptances(x_obs, left, right, dists):
+    """Return (n_trials, n_intervals, n_sources) array of acceptances
+    (fraction of surviving events) in each interval
+    """
+    _cdfs = np.stack([dist.cdf(x_obs) for dist in dists], axis=2)
+    acceptance = _cdfs[:, right, :] - _cdfs[:, left, :]
+    assert len(acceptance.shape) == 3
+    return acceptance
