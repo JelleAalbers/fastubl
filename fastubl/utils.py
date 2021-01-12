@@ -140,30 +140,29 @@ def binom_interval(success, total, cl=0.6826895):
 
 
 @export
-def recover_intervals(r, skips, n_in_interval, domain):
-    """Return (left, right, n_observed), (n_trials) arrays of interval bounds
-    :param x_obs: (n_trials, n_events_max)
-    :param skips: (n_trials,) events to skip over
-    :param n_in_interval: (n_trials,) observed events in interval
-    """
-    n_trials, n_events_max = r['x_obs'].shape
-    if n_events_max == 0:
-        return (np.ones(n_trials) * domain[0],
-                np.ones(n_trials) * domain[1],
-                n_in_interval)
-    left = _to_bounds(r, skips, domain)
-    right = _to_bounds(r, skips + n_in_interval + 1, domain)
-    return left, right, n_in_interval
+def endpoints(x_obs, present, p_obs, domain, only_x=False):
+    n_trials, n_max_events, n_sources = p_obs.shape
 
-def _to_bounds(r, endpoint_i, domain):
-    # endpoint = 0: left domain bound
-    # endpoint = 1: first event, i.e. index 0 in x_obs
-    # endpoint > observed_events: right domain bound
-    n_trials, n_events_max = r['x_obs'].shape
-    n_events = r['present'].sum(axis=1)
-    assert endpoint_i.shape == (n_trials,)
-    result = r['x_obs'][np.arange(endpoint_i.size),
-                        (endpoint_i - 1).clip(0, n_events - 1)]
-    result[endpoint_i == 0] = domain[0]
-    result[endpoint_i > n_events] = domain[1]
-    return result
+    # Map fake events to right edge of domain
+    x = np.where(present, x_obs, domain[1])
+    # Sort by ascending x values
+    x, p_obs, present = sort_all_by_axis1(x, p_obs, present)
+    # add endpoint markers events at edges of domain
+    x = np.concatenate([np.ones((n_trials, 1)) * domain[0],
+                        x,
+                        np.ones((n_trials, 1)) * domain[1]],
+                       axis=1)
+
+    if only_x:
+        return x
+
+    # Add p_obs and present for fake events
+    p_obs = np.concatenate([np.ones((n_trials, 1, n_sources)),
+                            p_obs,
+                            np.ones((n_trials, 1, n_sources))],
+                           axis=1)
+    present = np.concatenate([np.zeros((n_trials, 1), dtype=np.bool_),
+                              present,
+                              np.zeros((n_trials, 1), dtype=np.bool_)],
+                             axis=1)
+    return x, present, p_obs

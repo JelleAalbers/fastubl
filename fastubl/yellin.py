@@ -51,38 +51,37 @@ class YellinMethod(fastubl.NeymanConstruction):
         return sum_cdf
 
     def get_k_largest(self, r, mu_null=None):
-        """Return (sizes, skip indices) of k-largest intervals
+        """Return ((sizes, skip indices) of k-largest intervals, x_endpoints)
         :param r: result dict
         :param mu_null: Expected signal events under test
         :return: (sizes, skips), both nd arrays. See fastubl.k_largest for details.
         """
+        if 'x_endpoints' not in r:
+            # Needed for interval lookups later
+            r['x_endpoints'] = fastubl.endpoints(r['x_obs'], r['present'], r['p_obs'], self.domain, only_x=True)
+
         if self.include_background and len(self.dists) > 1:
             # Use the sum of the signal and background
-            # This changes shape depending on mu_null.
+            # This changes shape depending on mu_null -> have to recompute
+            # the endpoints
             cdf = partial(self.sum_cdf, mu_null=mu_null)
-            xn = yellin_normalize(r['x_obs'], r['present'], cdf)
-            return k_largest(xn)
+            x_endpoints = fastubl.endpoints(r['x_obs'], r['present'], r['p_obs'], self.domain, only_x=True)
+            return k_largest(cdf(x_endpoints))
 
         else:
             # Without considering backgrounds, the interval sizes
-            # are the same for all mu_null.
-            # Cache them in a key in r.
+            # are the same for all mu_null, and based on the x_endpoints
+            # we already computed.
             if 'k_largest' not in r:
-                cdf = self.dists[0].cdf
-                xn = yellin_normalize(r['x_obs'], r['present'], cdf)
-                r['k_largest'] = k_largest(xn)
-
+                r['k_largest'] = k_largest(self.dists[0].cdf(r['x_endpoints']))
             return r['k_largest']
-
-    def recover_intervals(self, r, skips, n_in_interval):
-        return fastubl.recover_intervals(r, skips, n_in_interval, self.domain)
 
 
 @export
 class PMax(YellinMethod):
 
     def statistic(self, r, mu_null):
-        sizes, skips = self.get_k_largest(r, mu_null)
+        (sizes, skips) = self.get_k_largest(r, mu_null)
 
         # (n_trials, events_observed): P(more events in largest iterval)
         p_more = self.p_more_events(sizes, mu_null)
@@ -91,11 +90,14 @@ class PMax(YellinMethod):
         # (among maximal intervals of different observed count)
         best_n = np.argmax(p_more, axis=1)   # (n_trials,) array
 
+        trials = np.arange(r['n_trials'])
+        sizes, skips = sizes[trials, best_n], skips[trials, best_n]
+
         # For debugging / characterization, recover interval
-        r['interval'] = self.recover_intervals(
-            r,
-            skips=skips[np.arange(r['n_trials']), best_n],
-            n_in_interval=best_n)
+        r['interval'] = (
+            r['x_endpoints'][trials, skips],
+            r['x_endpoints'][trials, skips + best_n + 1],
+            best_n)
 
         # Excesses give low pmax, so we need to invert (or sign-flip)
         # to use the regular interval setting code.
@@ -192,10 +194,13 @@ class OptItv(YellinMethod):
         # highest cdf_size -> least indication of excess
         best_n = np.argmax(cdf_size, axis=1)
 
-        r['interval'] = self.recover_intervals(
-            r,
-            skips=skips[np.arange(r['n_trials']), best_n],
-            n_in_interval=best_n)
+        # For debugging / characterization, recover interval
+        trials = np.arange(r['n_trials'])
+        sizes, skips = sizes[trials, best_n], skips[trials, best_n]
+        r['interval'] = (
+            r['x_endpoints'][trials, skips],
+            r['x_endpoints'][trials, skips + best_n + 1],
+            best_n)
 
         # (We have to flip sign for our Neyman code, just like pmax)
         return -cdf_size[np.arange(r['n_trials']), best_n]
@@ -245,31 +250,3 @@ def k_largest(xn, max_n=None):
     assert sizes.min() > 0, "Encountered edge case"
 
     return sizes, starts
-
-
-@export
-def yellin_normalize(x, present, cdf=None):
-    x = np.asarray(x)
-
-    # Put float('inf') in place of present events
-    # -> They will be mapped to 1 after the CDF transform
-    # where they will not affect Yellin-like methods
-    x = np.where(present, x, float('inf'))
-
-    x = np.sort(x, axis=-1)
-    if cdf is not None:
-        x = cdf(x)
-    x = add_bounds(x)
-    return x
-
-
-@export
-def add_bounds(x):
-    """pad data along final axis by 0 and 1"""
-    x = np.asarray(x)
-    for q in [0, 1]:
-        x = np.pad(
-            x,
-            [(0, 0)] * (len(x.shape) - 1) + [(1 - q, q)],
-            mode='constant', constant_values=q)
-    return x

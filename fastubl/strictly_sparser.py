@@ -103,10 +103,9 @@ class StrictlySparserInterval(fastubl.NeymanConstruction):
         return np.where(is_valid, sparser, float('inf'))
 
     def intervals(self, r):
-        # TODO: actually don't need cdf transform at all!
-        x = fastubl.yellin_normalize(r['x_obs'], r['present'],
-                                     cdf=self.dists[0].cdf)
-        n_trials, n_endpoints_max = x.shape
+        x_endpoints = fastubl.endpoints(
+            r['x_obs'], r['present'], r['p_obs'], self.domain, only_x=True)
+        n_trials, n_endpoints_max = x_endpoints.shape
         left_i, right_i = fastubl.interval_indices(n_endpoints_max)
         n_observed = right_i - left_i - 1  # 0 observed if right = left + 1
 
@@ -116,7 +115,7 @@ class StrictlySparserInterval(fastubl.NeymanConstruction):
         n_events = r['present'].sum(axis=1)
         is_valid = right_i[None,:] <= n_events[:,None] + 1
 
-        left, right = x[:,left_i], x[:,right_i]
+        left, right = x_endpoints[:,left_i], x_endpoints[:,right_i]
         n_observed = n_observed[None, :] * np.ones(left.shape, dtype=np.int)
         assert left.shape == right.shape == n_observed.shape
 

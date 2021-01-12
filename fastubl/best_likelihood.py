@@ -18,11 +18,10 @@ class BestZech(fastubl.NeymanConstruction):
         best_i = np.argmin(score, axis=1)
 
         trials = np.arange(r['n_trials'])
-        r['interval'] = fastubl.recover_intervals(
-            r,
-            r['all_intervals']['left_i'][best_i],
-            r['all_intervals']['n_observed'][best_i],
-            self.domain)
+        r['interval'] = (
+            r['all_intervals']['left'][trials, best_i],
+            r['all_intervals']['right'][trials, best_i],
+            r['all_intervals']['n_observed'][best_i])
 
         return score[trials, best_i]
 
@@ -32,12 +31,14 @@ class BestZech(fastubl.NeymanConstruction):
         n_trials, n_max_events, n_sources = p_obs.shape
 
         if 'all_intervals' not in r:
-            x_obs = add_fake_and_sort(x_obs, present, p_obs, only_x=True)
+            x_endpoints = fastubl.endpoints(x_obs, present, p_obs, self.domain, only_x=True)
             n_endpoints = n_max_events + 2
 
             left, right = interval_indices(n_endpoints)
-            acceptance = interval_acceptances(x_obs, left, right, self.dists)
+            acceptance = interval_acceptances(x_endpoints, left, right, self.dists)
             r['all_intervals'] = dict(left_i=left,
+                                      left=x_endpoints[:, left],
+                                      right=x_endpoints[:, right],
                                       right_i=right,
                                       # If right 1 bigger than left, 0 observed
                                       n_observed=right - left - 1,
@@ -80,7 +81,7 @@ class BestLikelihood(fastubl.NeymanConstruction):
         assert x_obs.shape == present.shape
         n_trials, n_max_events, n_sources = p_obs.shape
 
-        x_obs, p_obs, present = add_fake_and_sort(x_obs, present, p_obs)
+        x_obs, p_obs, present = fastubl.endpoints(x_obs, present, p_obs, self.domain)
         n_endpoints = n_max_events + 2
 
         left, right = interval_indices(n_endpoints)
@@ -145,33 +146,6 @@ class BestLikelihood(fastubl.NeymanConstruction):
         r['left'], r['right'] = left, right
 
 
-
-def add_fake_and_sort(x_obs, present, p_obs, only_x=False):
-    n_trials, n_max_events, n_sources = p_obs.shape
-
-    # Map fake events to inf, where they won't affect the method.
-    x = np.where(present, x_obs, float('inf'))
-    # Sort by ascending x values
-    x, p_obs, present = fastubl.sort_all_by_axis1(x, p_obs, present)
-    # add fake events at(-inf, inf)
-    x = np.concatenate([-np.ones((n_trials, 1)) * float('inf'),
-                        x,
-                        np.ones((n_trials, 1)) * float('inf')],
-                       axis=1)
-
-    if only_x:
-        return x
-
-    # Add p_obs and present for fake events
-    p_obs = np.concatenate([np.ones((n_trials, 1, n_sources)),
-                            p_obs,
-                            np.ones((n_trials, 1, n_sources))],
-                           axis=1)
-    present = np.concatenate([np.zeros((n_trials, 1), dtype=np.bool_),
-                              present,
-                              np.zeros((n_trials, 1), dtype=np.bool_)],
-                             axis=1)
-    return x, present, p_obs
 
 @export
 def interval_indices(n_endpoints):
