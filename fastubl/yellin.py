@@ -74,29 +74,44 @@ class YellinMethod(fastubl.NeymanConstruction):
 
             return r['k_largest']
 
+    def recover_intervals(self, r, skips, n_in_interval):
+        return fastubl.recover_intervals(r, skips, n_in_interval, self.domain)
+
 
 @export
 class PMax(YellinMethod):
 
     def statistic(self, r, mu_null):
-        # NB: using -log(pmax)
+        sizes, skips = self.get_k_largest(r, mu_null)
 
-        sizes, _ = self.get_k_largest(r, mu_null)
+        # (n_trials, events_observed): P(more events in largest iterval)
+        p_more = self.p_more_events(sizes, mu_null)
 
+        # Find best interval
+        # (among maximal intervals of different observed count)
+        best_n = np.argmax(p_more, axis=1)   # (n_trials,) array
+
+        # For debugging / characterization, recover interval
+        r['interval'] = self.recover_intervals(
+            r,
+            skips=skips[np.arange(r['n_trials']), best_n],
+            n_in_interval=best_n)
+
+        # Excesses give low pmax, so we need to invert (or sign-flip)
+        # to use the regular interval setting code.
+        # Logging seems nice anyway
+        p_more_max = p_more[np.arange(r['n_trials']), best_n]
+        return -np.log(np.maximum(p_more_max, 1.e-9))
+
+    def p_more_events(self, sizes, mu_null):
         total_events = (self.mu_all(mu_null).sum()
                         if self.include_background
                         else mu_null)
 
         # P(more events in random interval of size)
-        n_in_interval = np.arange(sizes.shape[1])[np.newaxis,:]
-        p_more_events = stats.poisson(sizes * total_events).sf(n_in_interval)
+        n_in_interval = np.arange(sizes.shape[1])[np.newaxis, :]
+        return stats.poisson(sizes * total_events).sf(n_in_interval)
 
-        pmax = p_more_events.max(axis=1)
-
-        # Excesses give low pmax, so we need to invert (or sign-flip)
-        # to use the regular interval setting code.
-        # Logging seems nice anyway
-        return -np.log(np.maximum(pmax, 1.e-9))
 
 
 @export
@@ -110,13 +125,20 @@ class YMin(YellinMethod):
     def statistic(self, r, mu_null):
         # NB: using -log(pmax)
 
-        sizes, _ = self.get_k_largest(r, mu_null)
+        sizes, skips = self.get_k_largest(r, mu_null)
         n_in_interval = np.arange(sizes.shape[1])[np.newaxis, :]
 
         y = (n_in_interval - sizes * mu_null)/np.sqrt(sizes * mu_null)
 
         # Stronger deficits -> lower n | higher size -> lower y_min
-        return y.min(axis=1)
+        best_n = np.argmin(y, axis=1)
+
+        r['interval'] = self.recover_intervals(
+            r,
+            skips=skips[np.arange(r['n_trials']), best_n],
+            n_in_interval=best_n)
+
+        return y[np.arange(r['n_trials']), best_n]
 
 
 @export
@@ -136,7 +158,6 @@ class OptItv(YellinMethod):
     def do_neyman_construction(self):
         # TODO: compute P(Cn | n) instead, combine with Poisson for P(Cn | mu)?
         # -- only useful for Vanilla Yellin, not Neyman variation
-
         self.sizes_mc = []
         for mu_i, mu_s in enumerate(tqdm(
                 self.mu_s_grid,
@@ -150,7 +171,7 @@ class OptItv(YellinMethod):
         super().do_neyman_construction()
 
     def statistic(self, r, mu_null):
-        sizes, _ = self.get_k_largest(r, mu_null)
+        sizes, skips = self.get_k_largest(r, mu_null)
 
         mu_i = np.searchsorted(self.mu_s_grid, mu_null)
         n_trials, max_n = sizes.shape
@@ -168,11 +189,16 @@ class OptItv(YellinMethod):
             cdf_size[:, n] = p.clip(0, 1)
 
         # Find optimum interval n (for this mu)
-        # optimum_n = np.argmax(cdf_size, axis=1)
-
         # highest cdf_size -> least indication of excess
-        # (We have to flip sign for our Neyman code, just like c0 and pmax)
-        return -np.max(cdf_size, axis=1)
+        best_n = np.argmax(cdf_size, axis=1)
+
+        r['interval'] = self.recover_intervals(
+            r,
+            skips=skips[np.arange(r['n_trials']), best_n],
+            n_in_interval=best_n)
+
+        # (We have to flip sign for our Neyman code, just like pmax)
+        return -cdf_size[np.arange(r['n_trials']), best_n]
 
 
 @export

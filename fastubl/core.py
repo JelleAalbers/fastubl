@@ -34,6 +34,7 @@ class StatisticalProcedure:
 
     def __init__(self,
                  signal, *backgrounds,
+                 domain=(0., 1.),
                  mu_s_grid=None):
         """Generic statistical procedure
 
@@ -59,11 +60,11 @@ class StatisticalProcedure:
         if mu_s_grid is None:
             mu_s_grid = DEFAULT_MU_S_GRID.copy()
         self.mu_s_grid = mu_s_grid
+        self.domain = domain
 
-    def show_pdfs(self, domain=None):
-        if domain is None:
-            domain = np.linspace(-0.05, 1.05, 1000)
-        x = domain
+    def show_pdfs(self, x=None):
+        if x is None:
+            x = np.linspace(*self.domain, num=1000)
         ysum = 0
         for i, dist in enumerate(self.dists):
             y = self.true_mu[i] * dist.pdf(x)
@@ -74,7 +75,7 @@ class StatisticalProcedure:
 
         plt.legend(loc='best')
         plt.xlabel("Some observable x")
-        plt.xlim(domain[0], domain[-1])
+        plt.xlim(x[0], x[-1])
         plt.ylabel("d rate / dx")
 
     def compute_pdfs(self, x_obs):

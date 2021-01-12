@@ -75,12 +75,25 @@ class StrictlySparserInterval(fastubl.NeymanConstruction):
         sparser = np.where(np.isfinite(sparser) & np.isfinite(r['e_sparser_0']),
                            sparser / r['e_sparser_0'],
                            np.inf)
-        return np.min(sparser, axis=1)
+
+        best_i = np.argmin(sparser, axis=1)
+
+        # Recover interval
+        trials = np.arange(r['n_trials'])
+        r['interval'] = (
+            r['all_intervals']['left'][trials, best_i],
+            r['all_intervals']['right'][trials, best_i],
+            r['all_intervals']['n_observed'][trials, best_i])
+
+        return sparser[trials, best_i]
 
     def e_sparser(self, r, mu_i):
-        if 'intervals' not in r:
-            r['intervals'] = self.intervals(r)
-        left, right, n, is_valid = r['intervals']
+        if 'all_intervals' not in r:
+            r['all_intervals'] = self.intervals(r)
+        left = r['all_intervals']['left']
+        right = r['all_intervals']['right']
+        n = r['all_intervals']['n_observed']
+        is_valid = r['all_intervals']['is_valid']
 
         # E(number of strictly sparser intervals)
         # Lookup doesn't preserve shape, so ravel and reshape it is...
@@ -110,4 +123,7 @@ class StrictlySparserInterval(fastubl.NeymanConstruction):
         # (0, 1) is indeed included only once per trial:
         assert ((left[is_valid] == 0.) & (right[is_valid] == 1.)).sum() \
                == r['n_trials']
-        return left, right, n_observed, is_valid
+        return dict(left=left,
+                    right=right,
+                    n_observed=n_observed,
+                    is_valid=is_valid)

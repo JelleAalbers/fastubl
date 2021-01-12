@@ -137,3 +137,33 @@ def binom_interval(success, total, cl=0.6826895):
     if np.isnan(upper):
         upper = 1
     return lower, upper
+
+
+@export
+def recover_intervals(r, skips, n_in_interval, domain):
+    """Return (left, right, n_observed), (n_trials) arrays of interval bounds
+    :param x_obs: (n_trials, n_events_max)
+    :param skips: (n_trials,) events to skip over
+    :param n_in_interval: (n_trials,) observed events in interval
+    """
+    n_trials, n_events_max = r['x_obs'].shape
+    if n_events_max == 0:
+        return (np.ones(n_trials) * domain[0],
+                np.ones(n_trials) * domain[1],
+                n_in_interval)
+    left = _to_bounds(r, skips, domain)
+    right = _to_bounds(r, skips + n_in_interval + 1, domain)
+    return left, right, n_in_interval
+
+def _to_bounds(r, endpoint_i, domain):
+    # endpoint = 0: left domain bound
+    # endpoint = 1: first event, i.e. index 0 in x_obs
+    # endpoint > observed_events: right domain bound
+    n_trials, n_events_max = r['x_obs'].shape
+    n_events = r['present'].sum(axis=1)
+    assert endpoint_i.shape == (n_trials,)
+    result = r['x_obs'][np.arange(endpoint_i.size),
+                        (endpoint_i - 1).clip(0, n_events - 1)]
+    result[endpoint_i == 0] = domain[0]
+    result[endpoint_i > n_events] = domain[1]
+    return result

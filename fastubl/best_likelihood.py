@@ -14,31 +14,43 @@ class BestZech(fastubl.NeymanConstruction):
             r['p_fewer_0'] = self.p_fewer(r, 0)
 
         # p(fewer events): high value = excess, so take min over intervals
-        return np.min(self.p_fewer(r, mu_null) / r['p_fewer_0'],
-                      axis=1)
+        score = self.p_fewer(r, mu_null) / r['p_fewer_0']
+        best_i = np.argmin(score, axis=1)
+
+        trials = np.arange(r['n_trials'])
+        r['interval'] = fastubl.recover_intervals(
+            r,
+            r['all_intervals']['left_i'][best_i],
+            r['all_intervals']['n_observed'][best_i],
+            self.domain)
+
+        return score[trials, best_i]
 
     def p_fewer(self, r, mu_signal):
         x_obs, p_obs, present = r['x_obs'], r['p_obs'], r['present']
         assert x_obs.shape == present.shape
         n_trials, n_max_events, n_sources = p_obs.shape
 
-        x_obs = add_fake_and_sort(x_obs, present, p_obs, only_x=True)
-        n_endpoints = n_max_events + 2
+        if 'all_intervals' not in r:
+            x_obs = add_fake_and_sort(x_obs, present, p_obs, only_x=True)
+            n_endpoints = n_max_events + 2
 
-        left, right = interval_indices(n_endpoints)
-        acceptance = interval_acceptances(x_obs, left, right, self.dists)
+            left, right = interval_indices(n_endpoints)
+            acceptance = interval_acceptances(x_obs, left, right, self.dists)
+            r['all_intervals'] = dict(left_i=left,
+                                      right_i=right,
+                                      # If right 1 bigger than left, 0 observed
+                                      n_observed=right - left - 1,
+                                      acceptance=acceptance)
 
         # TODO: this should be factored out, it's done elsewhere
         mu = self.true_mu.copy()
         mu[0] = mu_signal
 
         # Get (trials, intervals) array of total mu
-        mu_total = (mu[None,None,:] * acceptance).sum(axis=2)
+        mu_total = (mu[None,None,:] * r['all_intervals']['acceptance']).sum(axis=2)
 
-        # (intervals) array of observed events in interval
-        n_observed = right - left - 1  # If right 1 bigger than left, 0 observed
-
-        return stats.poisson(mu_total).cdf(n_observed[None,:])
+        return stats.poisson(mu_total).cdf(r['all_intervals']['n_observed'][None,:])
 
 
 @export
@@ -168,8 +180,8 @@ def interval_indices(n_endpoints):
     :return: tuple of integer ndarrays, right > left
     """
     # left indices change quickly, right indices repeat before changing.
-    left, right = np.meshgrid(np.arange(n_endpoints),
-                              np.arange(n_endpoints))
+    left, right = np.meshgrid(np.arange(n_endpoints, dtype=np.int),
+                              np.arange(n_endpoints, dtype=np.int))
     left, right = left.ravel(), right.ravel()
     valid = right > left
     return left[valid], right[valid]
