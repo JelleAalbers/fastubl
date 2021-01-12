@@ -161,6 +161,7 @@ def add_fake_and_sort(x_obs, present, p_obs, only_x=False):
                              axis=1)
     return x, present, p_obs
 
+@export
 def interval_indices(n_endpoints):
     """Return (left, right) index array of all valid intervals
     :param n_endpoints: number of 'bin edges' / interval endpoints
@@ -174,11 +175,12 @@ def interval_indices(n_endpoints):
     return left[valid], right[valid]
 
 
-def interval_acceptances(x_obs, left, right, dists):
+@export
+def interval_acceptances(x_obs_endpoints, left, right, dists):
     """Return (n_trials, n_intervals, n_sources) array of acceptances
     (fraction of surviving events) in each interval
     """
-    _cdfs = np.stack([dist.cdf(x_obs) for dist in dists], axis=2)
+    _cdfs = np.stack([dist.cdf(x_obs_endpoints) for dist in dists], axis=2)
     acceptance = _cdfs[:, right, :] - _cdfs[:, left, :]
     assert len(acceptance.shape) == 3
     return acceptance

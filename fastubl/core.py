@@ -24,6 +24,7 @@ __all__ += ['DEFAULT_BATCH_SIZE',
 
 DEFAULT_BATCH_SIZE = 400
 DEFAULT_MU_S_GRID = np.geomspace(0.1, 50, 100)
+DEFAULT_MU_S_GRID.flags.writeable = False   # Prevent accidental clobbering
 DEFAULT_CL = 0.9
 DEFAULT_KIND = 'upper'
 
@@ -323,21 +324,6 @@ class RegularProcedure(StatisticalProcedure):
                 toy_maker=toy_maker)]
         result = np.concatenate(result)
         return result
-
-
-class PackedArray:
-    dtype: np.dtype
-    shape: typing.Tuple[int]
-    bytes: bytes
-
-    def __init__(self, a):
-        self.dtype = a.dtype
-        self.shape = a.shape
-        self.bytes = blosc.compress(a)
-
-    def asarray(self):
-        return np.frombuffer(blosc.decompress(self.bytes),
-                             dtype=self.dtype).reshape(self.shape)
 
 
 @export
