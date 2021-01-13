@@ -135,10 +135,12 @@ class YMin(YellinMethod):
         # Stronger deficits -> lower n | higher size -> lower y_min
         best_n = np.argmin(y, axis=1)
 
-        r['interval'] = self.recover_intervals(
-            r,
-            skips=skips[np.arange(r['n_trials']), best_n],
-            n_in_interval=best_n)
+        trials = np.arange(r['n_trials'])
+        sizes, skips = sizes[trials, best_n], skips[trials, best_n]
+        r['interval'] = (
+            r['x_endpoints'][trials, skips],
+            r['x_endpoints'][trials, skips + best_n + 1],
+            best_n)
 
         return y[np.arange(r['n_trials']), best_n]
 
@@ -156,6 +158,7 @@ class OptItv(YellinMethod):
     sizes_mc : list  # (mu_i) -> (max_n, mc_trials) arrays
 
     extra_cache_attributes = ('sizes_mc',)
+    cls = False
 
     def do_neyman_construction(self):
         # TODO: compute P(Cn | n) instead, combine with Poisson for P(Cn | mu)?
@@ -176,23 +179,30 @@ class OptItv(YellinMethod):
         sizes, skips = self.get_k_largest(r, mu_null)
 
         mu_i = np.searchsorted(self.mu_s_grid, mu_null)
-        n_trials, max_n = sizes.shape
-        max_n = min(max_n, self.sizes_mc[mu_i].shape[0] - 1)
 
         # Compute P(size_n < observed| mu)
-        cdf_size = np.zeros((n_trials, max_n))
-        # TODO: faster way? np.searchsorted has no axis argument...
-        # TODO: maybe numba helps?
-        for n in range(max_n):
-            # P(size_n < observed| mu)
-            # i.e. P that the n-interval is 'smaller' (has fewer events expected)
-            # Excess -> small intervals -> small ps
-            p = np.searchsorted(self.sizes_mc[mu_i][n], sizes[:,n]) / self.trials_per_s
-            cdf_size[:, n] = p.clip(0, 1)
+        p_smaller = self.p_smaller(sizes, mu_i)
 
         # Find optimum interval n (for this mu)
-        # highest cdf_size -> least indication of excess
-        best_n = np.argmax(cdf_size, axis=1)
+        # highest p_smaller -> lowest p_bigger -> least indication of excess
+        if self.cls and mu_i > 0:
+            # Do NOT recompute k_largest: want to know how this exact
+            # set of intervals looks under bg-only
+            # TODO: This probably only makes sense for Neyman version, not Yellin
+            p0 = self.p_smaller(sizes, 0)
+            if p0.shape[1] < p_smaller.shape[1]:
+                # We have some intervals with n_observed > anything ever
+                # seen by background-only MC, causing shape mismatch
+                p_smaller_0 = p_smaller * 0
+                p_smaller_0[:, :p0.shape[1]] = p0
+            else:
+                p_smaller_0 = p0[:p_smaller.shape[0],:p_smaller.shape[1]]
+            # TODO: check and handle div-zero, zero-div-zero...
+            best_n = np.argmin((1 - p_smaller)
+                               /(1 - p_smaller_0),
+                               axis=1)
+        else:
+            best_n = np.argmax(p_smaller, axis=1)
 
         # For debugging / characterization, recover interval
         trials = np.arange(r['n_trials'])
@@ -203,7 +213,26 @@ class OptItv(YellinMethod):
             best_n)
 
         # (We have to flip sign for our Neyman code, just like pmax)
-        return -cdf_size[np.arange(r['n_trials']), best_n]
+        return -p_smaller[np.arange(r['n_trials']), best_n]
+
+    def p_smaller(self, sizes, mu_i):
+        n_trials, max_n = sizes.shape
+        max_n = min(max_n, self.sizes_mc[mu_i].shape[0] - 1)
+        p_smaller = np.zeros((n_trials, max_n))
+        # TODO: faster way? np.searchsorted has no axis argument...
+        # TODO: maybe numba helps?
+        for n in range(max_n):
+            # P(size_n < observed| mu)
+            # i.e. P that the n-interval is 'smaller' (has fewer events expected)
+            # Excess -> small intervals -> small ps
+            p = np.searchsorted(self.sizes_mc[mu_i][n], sizes[:,n]) / self.trials_per_s
+            p_smaller[:, n] = p.clip(0, 1)
+        return p_smaller
+
+
+@export
+class OptItvCLs(OptItv):
+    cls = True
 
 
 @export
