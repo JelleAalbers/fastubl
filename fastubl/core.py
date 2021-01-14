@@ -31,6 +31,7 @@ DEFAULT_KIND = 'upper'
 
 @export
 class StatisticalProcedure:
+    random_unknown_background = 0
 
     def __init__(self,
                  signal, *backgrounds,
@@ -112,6 +113,32 @@ class StatisticalProcedure:
 
         # Split the events over toy datasets
         x_obs, present = _split_over_trials(n_obs_per_source, x_per_source)
+
+        # Add random background to each trial, if requested
+        if self.random_unknown_background != 0:
+            # Draw events in (0, 1) at first
+            n_random = stats.poisson(self.random_unknown_background).rvs(n_trials)
+            x_random, present_random = _split_over_trials(
+                n_random[None,:],
+                np.random.rand(n_random.sum())[:,None])
+
+            # Draw width and side (left/right) of background
+            # independently each trial
+            width = np.random.rand(n_trials)[:,None]
+            x_random = x_random * width
+            is_flipped = np.random.randint(2, size=n_trials)[:,None]
+            x_random = x_random * (1-is_flipped) + (1-x_random) * is_flipped
+
+            # Transform from (0,1) to domain
+            x_random = self.domain[0] + x_random * (self.domain[1] - self.domain[0])
+
+            # Concatenate to x_obs and present
+            x_obs = np.concatenate([x_obs, x_random], axis=1)
+            present = np.concatenate([present, present_random], axis=1)
+
+            # TODO: Should we sort so fake events are always on right side?
+            # (this might have been assumed somewhere?)
+
         return x_obs, present
 
     def compute_ps(self, x):
