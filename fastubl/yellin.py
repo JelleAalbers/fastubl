@@ -213,9 +213,10 @@ class OptItv(YellinMethod):
             best_n)
 
         # (We have to flip sign for our Neyman code, just like pmax)
-        return -p_smaller[np.arange(r['n_trials']), best_n]
+        return -p_smaller[trials, best_n]
 
     def p_smaller(self, sizes, mu_i):
+        # TODO: max_n isn't really n, badly named...
         n_trials, max_n = sizes.shape
         max_n = min(max_n, self.sizes_mc[mu_i].shape[0] - 1)
         p_smaller = np.zeros((n_trials, max_n))
@@ -241,7 +242,7 @@ class OptItvYellin(OptItv):
 
 
 @export
-def k_largest(xn, max_n=None):
+def k_largest(endpoints, max_n=None):
     """Return (sizes, skip_events) of largest intervals with different event count
     Both are (n_trials, max_n) arrays.
 
@@ -251,13 +252,13 @@ def k_largest(xn, max_n=None):
 
     For example, sizes[0] gives the expected number of events in the largest observed gap.
 
-    :param xn: Input data, Yellin-normalized, with added 0/1 events.
+    :param endpoints: CDF-mapped sorted endpoints to consider
         The last axis must be the data dimension, earlier axes can run over trials.
     :param max_n: Maximum event count inside interval to consider.
         Defaults to len(x) - 2, i.e. all events except the fake boundary events\
 
     """
-    x = xn
+    x = endpoints
     if len(x.shape) > 1:
         other_dims = list(x.shape[:-1])
     else:

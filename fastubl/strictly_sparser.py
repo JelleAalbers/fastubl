@@ -103,26 +103,4 @@ class StrictlySparserInterval(fastubl.NeymanConstruction):
         return np.where(is_valid, sparser, float('inf'))
 
     def intervals(self, r):
-        x_endpoints = fastubl.endpoints(
-            r['x_obs'], r['present'], r['p_obs'], self.domain, only_x=True)
-        n_trials, n_endpoints_max = x_endpoints.shape
-        left_i, right_i = fastubl.interval_indices(n_endpoints_max)
-        n_observed = right_i - left_i - 1  # 0 observed if right = left + 1
-
-        # Intervals may include 'fake' events mapped to right endpoint -> 1
-        # Make sure to include '1' only once as an endpoint:
-        # first occurrence is at endpoint index last_event + 2 = n_event + 1
-        n_events = r['present'].sum(axis=1)
-        is_valid = right_i[None,:] <= n_events[:,None] + 1
-
-        left, right = x_endpoints[:,left_i], x_endpoints[:,right_i]
-        n_observed = n_observed[None, :] * np.ones(left.shape, dtype=np.int)
-        assert left.shape == right.shape == n_observed.shape
-
-        # (0, 1) is indeed included only once per trial:
-        assert ((left[is_valid] == 0.) & (right[is_valid] == 1.)).sum() \
-               == r['n_trials']
-        return dict(left=left,
-                    right=right,
-                    n_observed=n_observed,
-                    is_valid=is_valid)
+        return fastubl.all_intervals(r, self.domain)

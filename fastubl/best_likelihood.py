@@ -1,5 +1,7 @@
+import numba
 import numpy as np
 from scipy import special, stats
+from tqdm import tqdm
 
 import fastubl
 
@@ -8,41 +10,121 @@ export, __all__ = fastubl.exporter()
 
 @export
 class BestZech(fastubl.NeymanConstruction):
+    look_elsewhere_corrected = False
+
+    def do_neyman_construction(self):
+        if not self.look_elsewhere_corrected:
+            return super().do_neyman_construction()
+
+        # List of (n_events, trial_i) with best CLs scores among intervals
+        # containing n_events
+        self.cls_n_mc = []
+        for mu_i, mu_s in enumerate(tqdm(
+                self.mu_s_grid,
+                desc='MC for CLs(n) lookup table')):
+
+            r = self.toy_data(self.trials_per_s, mu_s_true=mu_s)
+            n_max = int(r['present'].sum(axis=1).max())
+
+            score = self.p_fewer(r, mu_s) / self.p_fewer(r, 0)
+            best_cls, _ = self.get_min_per_n(
+                score=score,
+                n=r['all_intervals']['n_observed'],
+                max_n=n_max,
+                is_valid=r['all_intervals']['is_valid'].astype(np.int))
+            assert best_cls.shape == (n_max + 1, r['n_trials'])
+            self.cls_n_mc.append(np.sort(best_cls, axis=-1))
+
+        return super().do_neyman_construction()
+
+    def get_min_per_n(self, score, n, max_n, is_valid, full_domain_default=None):
+        """Return (max_n+1, n_trials) array"""
+        n_trials, n_intervals = score.shape
+        assert n.shape == is_valid.shape == score.shape
+
+        # For n > observed, the code below won't set anything.
+        # Thus, find the full-domain index now
+        full_domain_indices = np.argmax(n * is_valid, axis=1)
+        result_i = np.ones((max_n + 1, n_trials), dtype=np.int64) \
+                   * full_domain_indices.reshape(1, -1)
+        result = np.ones((max_n + 1, n_trials), dtype=np.float64)
+        if full_domain_default is None:
+            full_domain_score = score[np.arange(n_trials), full_domain_indices]
+            result *= full_domain_score.reshape(1, -1)    # numba doesn't do np.newaxis
+        else:
+            result *= full_domain_default
+
+        self._fill_min_per_n_result(score, n, max_n, is_valid, result, result_i)
+        return result, result_i
+
+    @staticmethod
+    @numba.njit
+    def _fill_min_per_n_result(score, n, max_n, is_valid, result, result_i):
+        n_trials, n_intervals = score.shape
+        for trial_i in range(n_trials):
+            for interval_i in range(n_intervals):
+                if not is_valid[trial_i, interval_i]:
+                    continue
+                _n = n[trial_i, interval_i]
+                if _n > max_n:
+                    # Beyond max_n we needed to consider
+                    # (if we'd proceed, we get a buffer overflow
+                    #  which numba does not check...)
+                    continue
+                x = score[trial_i, interval_i]
+                if x < result[_n, trial_i]:
+                    result[_n, trial_i] = x
+                    result_i[_n, trial_i] = interval_i
 
     def statistic(self, r, mu_null):
         if 'p_fewer_0' not in r:
             r['p_fewer_0'] = self.p_fewer(r, 0)
-
-        # p(fewer events): high value = excess, so take min over intervals
-        score = self.p_fewer(r, mu_null) / r['p_fewer_0']
-        best_i = np.argmin(score, axis=1)
-
         trials = np.arange(r['n_trials'])
+
+        # p(fewer events): high value = excess, so we want to minimize score
+        score = self.p_fewer(r, mu_null) / r['p_fewer_0']
+
+        if self.look_elsewhere_corrected:
+            # Very similar to Optimum interval here
+            # Any way top reduce duplication?
+            mu_i = np.searchsorted(self.mu_s_grid, mu_null)
+            max_n = len(self.cls_n_mc[mu_i]) - 1
+            cls_n, min_is = self.get_min_per_n(
+                score=score,
+                n=r['all_intervals']['n_observed'],
+                max_n=max_n,
+                is_valid=r['all_intervals']['is_valid'].astype(np.int))
+
+            # TODO: ? CLS: Lowest -> Least probability to be >=
+            ps = np.zeros((r['n_trials'], max_n + 1))
+            # TODO: faster way? np.searchsorted has no axis argument...
+            n_events = r['present'].sum()
+            for n in range(ps.shape[1]):
+                p = np.searchsorted(self.cls_n_mc[mu_i][n], cls_n[n,:]) / self.trials_per_s
+                ps[:, n] = np.where(n_events < n,
+                                    float('inf'), # Never pick n > observed
+                                    p.clip(0, 1))
+            # TODO: temp
+            r['cls_n'] = cls_n
+            r['p_higher'] = ps
+
+            best_i = min_is[np.argmin(ps, axis=1), trials]
+        else:
+            best_i = np.argmin(score, axis=1)
+
         r['interval'] = (
             r['all_intervals']['left'][trials, best_i],
             r['all_intervals']['right'][trials, best_i],
-            r['all_intervals']['n_observed'][best_i])
+            r['all_intervals']['n_observed'][trials, best_i])
 
         return score[trials, best_i]
 
     def p_fewer(self, r, mu_signal):
         x_obs, p_obs, present = r['x_obs'], r['p_obs'], r['present']
         assert x_obs.shape == present.shape
-        n_trials, n_max_events, n_sources = p_obs.shape
 
         if 'all_intervals' not in r:
-            x_endpoints = fastubl.endpoints(x_obs, present, p_obs, self.domain, only_x=True)
-            n_endpoints = n_max_events + 2
-
-            left, right = interval_indices(n_endpoints)
-            acceptance = interval_acceptances(x_endpoints, left, right, self.dists)
-            r['all_intervals'] = dict(left_i=left,
-                                      left=x_endpoints[:, left],
-                                      right=x_endpoints[:, right],
-                                      right_i=right,
-                                      # If right 1 bigger than left, 0 observed
-                                      n_observed=right - left - 1,
-                                      acceptance=acceptance)
+            r['all_intervals'] = all_intervals(r, self.domain, self.dists)
 
         # TODO: this should be factored out, it's done elsewhere
         mu = self.true_mu.copy()
@@ -51,7 +133,13 @@ class BestZech(fastubl.NeymanConstruction):
         # Get (trials, intervals) array of total mu
         mu_total = (mu[None,None,:] * r['all_intervals']['acceptance']).sum(axis=2)
 
-        return stats.poisson(mu_total).cdf(r['all_intervals']['n_observed'][None,:])
+        return stats.poisson(mu_total).cdf(r['all_intervals']['n_observed'])
+
+
+@export
+class BestZechLEE(BestZech):
+    look_elsewhere_corrected = True
+    extra_cache_attributes = ('cls_n_mc',)
 
 
 @export
@@ -170,3 +258,37 @@ def interval_acceptances(x_obs_endpoints, left, right, dists):
     acceptance = _cdfs[:, right, :] - _cdfs[:, left, :]
     assert len(acceptance.shape) == 3
     return acceptance
+
+
+@export
+def all_intervals(r, domain, dists=None):
+    x_endpoints = fastubl.endpoints(
+        r['x_obs'], r['present'], r['p_obs'], domain, only_x=True)
+    n_trials, n_endpoints_max = x_endpoints.shape
+    left_i, right_i = fastubl.interval_indices(n_endpoints_max)
+    n_observed = right_i - left_i - 1  # 0 observed if right = left + 1
+
+    # Intervals may include 'fake' events mapped to right endpoint -> 1
+    # Make sure to include '1' only once as an endpoint:
+    # first occurrence is at endpoint index last_event + 2 = n_event + 1
+    n_events = r['present'].sum(axis=1)
+    is_valid = right_i[None, :] <= n_events[:, None] + 1
+
+    left, right = x_endpoints[:, left_i], x_endpoints[:, right_i]
+    n_observed = n_observed[None, :] * np.ones(left.shape, dtype=np.int)
+    assert left.shape == right.shape == n_observed.shape
+
+    # (0, 1) is indeed marked as valid only once per trial:
+    assert ((left[is_valid] == 0.) & (right[is_valid] == 1.)).sum() \
+           == r['n_trials']
+
+    result = dict(left=left,
+                  right=right,
+                  left_i=left_i,
+                  right_i=right_i,
+                  n_observed=n_observed,
+                  is_valid=is_valid)
+
+    if dists is not None:
+        result['acceptance'] = interval_acceptances(x_endpoints, left_i, right_i, dists)
+    return result
