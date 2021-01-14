@@ -16,8 +16,8 @@ class BestZech(fastubl.NeymanConstruction):
         if not self.look_elsewhere_corrected:
             return super().do_neyman_construction()
 
-        # List of (n_events, trial_i) with best CLs scores among intervals
-        # containing n_events
+        # List of list of arrays, (mu_i, n_events, trial_i)
+        # best CLs scores among intervals containing n_events (if present)
         self.cls_n_mc = []
         for mu_i, mu_s in enumerate(tqdm(
                 self.mu_s_grid,
@@ -33,26 +33,18 @@ class BestZech(fastubl.NeymanConstruction):
                 max_n=n_max,
                 is_valid=r['all_intervals']['is_valid'].astype(np.int))
             assert best_cls.shape == (n_max + 1, r['n_trials'])
-            self.cls_n_mc.append(np.sort(best_cls, axis=-1))
+            self.cls_n_mc.append([np.sort(x[np.isfinite(x)])
+                                  for x in best_cls])
 
         return super().do_neyman_construction()
 
-    def get_min_per_n(self, score, n, max_n, is_valid, full_domain_default=None):
+    def get_min_per_n(self, score, n, max_n, is_valid):
         """Return (max_n+1, n_trials) array"""
         n_trials, n_intervals = score.shape
         assert n.shape == is_valid.shape == score.shape
 
-        # For n > observed, the code below won't set anything.
-        # Thus, find the full-domain index now
-        full_domain_indices = np.argmax(n * is_valid, axis=1)
-        result_i = np.ones((max_n + 1, n_trials), dtype=np.int64) \
-                   * full_domain_indices.reshape(1, -1)
-        result = np.ones((max_n + 1, n_trials), dtype=np.float64)
-        if full_domain_default is None:
-            full_domain_score = score[np.arange(n_trials), full_domain_indices]
-            result *= full_domain_score.reshape(1, -1)    # numba doesn't do np.newaxis
-        else:
-            result *= full_domain_default
+        result_i = np.ones((max_n + 1, n_trials), dtype=np.int)
+        result = np.ones((max_n + 1, n_trials), dtype=np.float) * np.nan
 
         self._fill_min_per_n_result(score, n, max_n, is_valid, result, result_i)
         return result, result_i
@@ -72,7 +64,7 @@ class BestZech(fastubl.NeymanConstruction):
                     #  which numba does not check...)
                     continue
                 x = score[trial_i, interval_i]
-                if x < result[_n, trial_i]:
+                if np.isnan(result[_n, trial_i]) or x < result[_n, trial_i]:
                     result[_n, trial_i] = x
                     result_i[_n, trial_i] = interval_i
 
@@ -95,15 +87,35 @@ class BestZech(fastubl.NeymanConstruction):
                 max_n=max_n,
                 is_valid=r['all_intervals']['is_valid'].astype(np.int))
 
-            # TODO: ? CLS: Lowest -> Least probability to be >=
-            ps = np.zeros((r['n_trials'], max_n + 1))
+            # TODO: ? CLS: Lowest -> Least probability to be <=
+            ps = np.ones((r['n_trials'], max_n + 1)) * float('inf')
             # TODO: faster way? np.searchsorted has no axis argument...
-            n_events = r['present'].sum()
+            n_events = r['present'].sum(axis=1)
             for n in range(ps.shape[1]):
-                p = np.searchsorted(self.cls_n_mc[mu_i][n], cls_n[n,:]) / self.trials_per_s
-                ps[:, n] = np.where(n_events < n,
-                                    float('inf'), # Never pick n > observed
-                                    p.clip(0, 1))
+                # Do not consider n larger than numbers seen in 80% of MC
+                # trials. We're after sparse intervals: these clearly aren't.
+                # (and the estimate under (a) below would be unreliable)
+                mc_scores = self.cls_n_mc[mu_i][n]
+                if len(mc_scores) < self.trials_per_s * 0.2:
+                    break
+
+                # P of having < n events in the full domain
+                # (so there won't be an n-events-containing interval)
+                #   ( Careful with .sum() here, true_mu[1:] might be empty.
+                #     If you add before sum, broadcasting makes the
+                #     addition vanish... )
+                p_fewer = stats.poisson((mu_null + self.true_mu[1:].sum())).cdf(n - 1)
+
+                # Probability of
+                # (a) seeing a lower min-score (and >= n events) or
+                # (b) having < n events in the domain
+                p = p_fewer + (1 - p_fewer) * np.searchsorted(mc_scores, cls_n[n,:]) / len(mc_scores)
+
+                # Never pick n > total observed events
+                # (differs each trial, so couldn't just limit for loop)
+                ps[:, n] = np.where(n > n_events,
+                                    float('inf'),
+                                    p)
             # TODO: temp
             r['cls_n'] = cls_n
             r['p_higher'] = ps
