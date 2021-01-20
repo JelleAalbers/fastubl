@@ -10,10 +10,10 @@ export, __all__ = fastubl.exporter()
 
 @export
 class BestZech(fastubl.NeymanConstruction):
-    look_elsewhere_corrected = False
+    lee_correction = None
 
     def do_neyman_construction(self):
-        if not self.look_elsewhere_corrected:
+        if self.lee_correction != 'p_per_n':
             return super().do_neyman_construction()
 
         # List of list of arrays, (mu_i, n_events, trial_i)
@@ -72,11 +72,16 @@ class BestZech(fastubl.NeymanConstruction):
         if 'p_fewer_0' not in r:
             r['p_fewer_0'] = self.p_fewer(r, 0)
         trials = np.arange(r['n_trials'])
+        # Careful with .sum() here, true_mu[1:] might be empty.
+        # If you add before sum, broadcasting makes the
+        # addition vanish...
+        total_mu = (mu_null + self.true_mu[1:].sum())
 
         # p(fewer events): high value = excess, so we want to minimize score
         score = self.p_fewer(r, mu_null) / r['p_fewer_0']
+        score[~r['all_intervals']['is_valid']] = float('inf')
 
-        if self.look_elsewhere_corrected:
+        if self.lee_correction == 'p_per_n':
             # Very similar to Optimum interval here
             # Any way top reduce duplication?
             mu_i = np.searchsorted(self.mu_s_grid, mu_null)
@@ -101,10 +106,7 @@ class BestZech(fastubl.NeymanConstruction):
 
                 # P of having < n events in the full domain
                 # (so there won't be an n-events-containing interval)
-                #   ( Careful with .sum() here, true_mu[1:] might be empty.
-                #     If you add before sum, broadcasting makes the
-                #     addition vanish... )
-                p_fewer = stats.poisson((mu_null + self.true_mu[1:].sum())).cdf(n - 1)
+                p_fewer = stats.poisson(total_mu).cdf(n - 1)
 
                 # Probability of
                 # (a) seeing a lower min-score (and >= n events) or
@@ -121,6 +123,14 @@ class BestZech(fastubl.NeymanConstruction):
             r['p_higher'] = ps
 
             best_i = min_is[np.argmin(ps, axis=1), trials]
+
+        elif self.lee_correction == 'approx':
+            n = r['all_intervals']['n_observed']
+            score /= (
+                ((1 + n)/(1 + total_mu)).clip(0, 1)
+                * stats.poisson(total_mu).sf(n - 1))
+            best_i = np.argmin(score, axis=1)
+
         else:
             best_i = np.argmin(score, axis=1)
 
@@ -150,8 +160,13 @@ class BestZech(fastubl.NeymanConstruction):
 
 @export
 class BestZechLEE(BestZech):
-    look_elsewhere_corrected = True
+    lee_correction = 'p_per_n'
     extra_cache_attributes = ('cls_n_mc',)
+
+
+@export
+class BestZechLEEApprox(BestZech):
+    lee_correction = 'approx'
 
 
 @export
