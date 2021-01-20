@@ -32,6 +32,7 @@ DEFAULT_KIND = 'upper'
 @export
 class StatisticalProcedure:
     random_unknown_background = 0
+    random_unknown_kind = 'spike'
 
     def __init__(self,
                  signal, *backgrounds,
@@ -124,10 +125,17 @@ class StatisticalProcedure:
 
             # Draw width and side (left/right) of background
             # independently each trial
-            width = np.random.rand(n_trials)[:,None]
-            x_random = x_random * width
-            is_flipped = np.random.randint(2, size=n_trials)[:,None]
-            x_random = x_random * (1-is_flipped) + (1-x_random) * is_flipped
+            if self.random_unknown_kind == 'border_flat':
+                width = np.random.rand(n_trials)[:,None]
+                x_random = x_random * width
+                is_flipped = np.random.randint(2, size=n_trials)[:,None]
+                x_random = x_random * (1-is_flipped) + (1-x_random) * is_flipped
+
+            elif self.random_unknown_kind == 'spike':
+                x_random = 0 * x_random + np.random.rand(n_trials)[:,None]
+
+            else:
+                raise NotImplementedError(self.random_unknown_kind)
 
             # Transform from (0,1) to domain
             x_random = self.domain[0] + x_random * (self.domain[1] - self.domain[0])
