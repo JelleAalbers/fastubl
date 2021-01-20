@@ -58,15 +58,14 @@ class YellinMethod(fastubl.NeymanConstruction):
         """
         if 'x_endpoints' not in r:
             # Needed for interval lookups later
-            r['x_endpoints'] = fastubl.endpoints(r['x_obs'], r['present'], r['p_obs'], self.domain, only_x=True)
+            r['x_endpoints'] = fastubl.endpoints(
+                r['x_obs'], r['present'], r['p_obs'], self.domain, only_x=True)
 
         if self.include_background and len(self.dists) > 1:
             # Use the sum of the signal and background
             # This changes shape depending on mu_null -> have to recompute
             # the endpoints
-            cdf = partial(self.sum_cdf, mu_null=mu_null)
-            x_endpoints = fastubl.endpoints(r['x_obs'], r['present'], r['p_obs'], self.domain, only_x=True)
-            return k_largest(cdf(x_endpoints))
+            return k_largest(self.sum_cdf(r['x_endpoints'], mu_null))
 
         else:
             # Without considering backgrounds, the interval sizes
