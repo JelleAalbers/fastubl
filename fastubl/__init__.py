@@ -11,5 +11,6 @@ from .yellin import *
 from .region_seeking import *
 from .best_likelihood import *
 from .strictly_sparser import *
+from .combined import *
 
 from .wilks_hist import *

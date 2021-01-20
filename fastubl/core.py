@@ -442,6 +442,11 @@ class NeymanConstruction(RegularProcedure):
             # Mc results are already sorted
             return self.mc_results[:,np.round(quantile * self.trials_per_s).astype(np.int)]
 
+    def t_cdf(self, t, mu_null):
+        """Return array of P(t < ... | mu_null)"""
+        mu_i = np.argmin(np.abs(self.mu_s_grid - mu_null))
+        return np.searchsorted(self.mc_results[mu_i], t) / self.trials_per_s
+
 
 @numba.njit
 def _split_over_trials(n_obs_per_source, x_per_source):
