@@ -187,7 +187,8 @@ class SacrificialPoisson(fastubl.StatisticalProcedure):
             present=r['present'] & is_training,
             p_obs=r['p_obs'],
             dists=self.dists,
-            bg_mus=self.true_mu[1:] * self.sacrifice_f)
+            bg_mus=self.true_mu[1:] * self.sacrifice_f,
+            domain=self.domain)
 
         # Compute Poisson limit on test data in the same interval
         left, right = best_poisson['interval_bounds']

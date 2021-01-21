@@ -8,12 +8,17 @@ export, __all__ = fastubl.exporter()
 
 @export
 class PoissonSeeker(fastubl.NeymanConstruction):
-    """Use P(more events in interval), in interval with lowest Poisson upper
-    limit.
+    """Return lowest Poisson limit among intervals
     """
-    def __init__(self, *args, optimize_for_cl=fastubl.DEFAULT_CL, **kwargs):
+    def __init__(self, *args,
+                 optimize_for_cl=fastubl.DEFAULT_CL,
+                 pcl_sigma=None,
+                 **kwargs):
         self.optimize_for_cl = optimize_for_cl
-        self.guide = fastubl.PoissonGuide(optimize_for_cl)
+        self.pcl_sigma = pcl_sigma
+        self.guide = fastubl.PoissonGuide(
+            optimize_for_cl=optimize_for_cl,
+            pcl_sigma=pcl_sigma)
         super().__init__(*args, **kwargs)
 
     def statistic(self, r, mu_null):
@@ -24,23 +29,18 @@ class PoissonSeeker(fastubl.NeymanConstruction):
                 present=r['present'],
                 p_obs=r['p_obs'],
                 dists=self.dists,
-                bg_mus=self.true_mu[1:])
+                bg_mus=self.true_mu[1:],
+                domain=self.domain)
+            r['interval'] = (
+                r['best_poisson']['interval_bounds'][0],
+                r['best_poisson']['interval_bounds'][1],
+                r['best_poisson']['n_observed'])
 
-        mu_bg = np.sum(r['best_poisson']['acceptance'][:,1:]
-                       * np.array(self.true_mu[1:])[np.newaxis, :],
-                       axis=1)
-        mu_sig = mu_null * r['best_poisson']['acceptance'][:,0]
-
-        bp = r['best_poisson']
-        pmax = stats.poisson(mu_sig + mu_bg).sf(bp['n_observed'])
-
-        # Excesses give low pmax, so we need to invert (or sign-flip)
-        # to use the regular interval setting code.
-        # Logging seems nice anyway
-        return -np.log(np.maximum(pmax, 1.e-9))
+        return r['best_poisson']['guide_results']
 
     def extra_hash_dict(self):
-        return dict(optimize_for_cl=self.optimize_for_cl)
+        return dict(optimize_for_cl=self.optimize_for_cl,
+                    pcl_sigma=self.pcl_sigma)
 
 
 class GuidedLikelihoodBase(fastubl.UnbinnedLikelihoodExact):
@@ -53,7 +53,8 @@ class GuidedLikelihoodBase(fastubl.UnbinnedLikelihoodExact):
                 present=r['present'],
                 p_obs=r['p_obs'],
                 dists=self.dists,
-                bg_mus=self.true_mu[1:])
+                bg_mus=self.true_mu[1:],
+                domain=self.domain)
 
         # Mask out data, except in the interval
         intervals = r['guide_result']['interval_bounds']

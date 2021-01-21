@@ -43,3 +43,14 @@ class PMaxWithLLR(CombinedProcedure):
 class PMaxYWithLLR(CombinedProcedure):
     procedures = (fastubl.PMaxYellin,
                   fastubl.UnbinnedLikelihoodExact)
+
+@export
+class PMaxOILLR(CombinedProcedure):
+    procedures = (fastubl.PMax,
+                  fastubl.OptItv,
+                  fastubl.UnbinnedLikelihoodExact)
+
+@export
+class BestZechLLR(CombinedProcedure):
+    procedures = (fastubl.BestZech,
+                  fastubl.UnbinnedLikelihoodExact)

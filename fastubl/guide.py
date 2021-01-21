@@ -1,4 +1,5 @@
 import numpy as np
+from scipy import stats
 from scipy.special import xlogy
 
 import fastubl
@@ -15,7 +16,7 @@ class Guide:
     def guide(self, left, right, n_observed, p_obs, present, bg_mus, acceptance):
         raise NotImplementedError
 
-    def __call__(self, x_obs, p_obs, present, dists, bg_mus):
+    def __call__(self, x_obs, p_obs, present, dists, bg_mus, domain):
         """Find best interval in the data that minimizes a guide function
 
         :param x_obs: (trial_i, event_j)
@@ -41,49 +42,17 @@ class Guide:
         bg_mus = np.asarray(bg_mus)
         n_events = present.sum(axis=1)
         nmax = n_events.max()
-        n_sources = p_obs.shape[2]
 
-        # (Code below is similar to 'Yellin normalize' in yellin.py)
-
-        # Map fake events to inf, where they won't affect the method.
-        x = np.where(present, x_obs, float('inf'))
-        # Sort by ascending x values
-        x, p_obs, present = fastubl.sort_all_by_axis1(x, p_obs, present)
-        # add fake events at(-inf, inf)
-        n_trials = x.shape[0]
-        x = np.concatenate([-np.ones((n_trials, 1)) * float('inf'),
-                            x,
-                            np.ones((n_trials, 1)) * float('inf')],
-                           axis=1)
-
-        # Add p_obs and present for fake events too
-        # TODO: can skip this for Poisson guide. Worth it?
-        p_obs = np.concatenate([np.ones((n_trials, 1, n_sources)),
-                                p_obs,
-                                np.ones((n_trials, 1, n_sources))],
-                                axis=1)
-        present = np.concatenate([np.zeros((n_trials, 1), dtype=np.bool_),
-                                  present,
-                                  np.zeros((n_trials, 1), dtype=np.bool_)],
-                                  axis=1)
-
-        # Get matrices of (left, right) indices of all intervals.
-        # With the addition of two 'events' at the bounds, we have nmax+2 valid
-        # indices to consider.
-        # left indices change quickly, right indices repeat before changing.
-        left, right = np.meshgrid(np.arange(nmax + 2), np.arange(nmax + 2))
-        left, right = left.ravel(), right.ravel()
-        valid = right > left
-        left, right = left[valid], right[valid]
+        x, present, p_obs = fastubl.endpoints(x_obs, present, p_obs, domain)
+        n_endpoints = nmax + 2
+        left, right = fastubl.interval_indices(n_endpoints)
 
         # Intervals end just before the events, so -1 here, not +1!
         n_observed = right - left - 1  # (indices)
 
         # Find acceptances (fraction of surviving events) of each interval
         # (trial, interval, source)
-        _cdfs = np.stack([dist.cdf(x) for dist in dists], axis=2)
-        acceptance = _cdfs[:, right, :] - _cdfs[:, left, :]
-        assert len(acceptance.shape) == 3
+        acceptance = fastubl.interval_acceptances(x, left, right, dists)
 
         # Obtain guide results; (trial, interval) array
         guide_results = self.guide(
@@ -113,8 +82,11 @@ class Guide:
 class PoissonGuide(Guide):
     """Guide to the interval that would give the best Poisson upper limit.
     """
-    def __init__(self, optimize_for_cl=fastubl.DEFAULT_CL):
+    def __init__(self,
+                 pcl_sigma=None,
+                 optimize_for_cl=fastubl.DEFAULT_CL):
         self.optimize_for_cl = optimize_for_cl
+        self.pcl_sigma = pcl_sigma
         # Lookup array of Poisson ULs
         self.poisson_uls_flat = fastubl.poisson_ul(np.arange(1000),
                                                    cl=self.optimize_for_cl)
@@ -133,9 +105,18 @@ class PoissonGuide(Guide):
 
         assert n_observed.min() == 0
         n_limit = self.poisson_uls_flat[n_observed] - mu_bg
-        # Note: clip to poisson_uls_flat[0] to avoid
-        # attraction to background underfluctuations
-        n_limit = n_limit.clip(self.poisson_uls_flat[0], None)
+
+        # Handle background underfluctuations
+        if self.pcl_sigma is None:
+            # Clip to poisson_uls_flat[0]
+            n_limit = n_limit.clip(self.poisson_uls_flat[0], None)
+        else:
+            # PCL, with Gaussian approx to poisson
+            power_constraint = (
+                (n_observed - mu_bg).clip(0, None)
+                + np.sqrt(mu_bg) * stats.norm.ppf(self.optimize_for_cl))
+            n_limit = n_limit.clip(power_constraint, None)
+
         with np.errstate(all='ignore'):
             # 0 acceptance -> no limit on mu (infinity)
             return np.where(acceptance[:, :, 0] == 0,

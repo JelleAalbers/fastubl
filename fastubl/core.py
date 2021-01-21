@@ -20,13 +20,15 @@ export, __all__ = fastubl.exporter()
 __all__ += ['DEFAULT_BATCH_SIZE',
             'DEFAULT_MU_S_GRID',
             'DEFAULT_CL',
-            'DEFAULT_KIND']
+            'DEFAULT_KIND',
+            'DEFAULT_DOMAIN']
 
 DEFAULT_BATCH_SIZE = 400
 DEFAULT_MU_S_GRID = np.geomspace(0.1, 50, 100)
 DEFAULT_MU_S_GRID.flags.writeable = False   # Prevent accidental clobbering
 DEFAULT_CL = 0.9
 DEFAULT_KIND = 'upper'
+DEFAULT_DOMAIN = (0., 1.)
 
 
 @export
@@ -36,7 +38,7 @@ class StatisticalProcedure:
 
     def __init__(self,
                  signal, *backgrounds,
-                 domain=(0., 1.),
+                 domain=DEFAULT_DOMAIN,
                  mu_s_grid=None):
         """Generic statistical procedure
 
