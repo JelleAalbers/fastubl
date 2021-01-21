@@ -1,3 +1,5 @@
+import typing as ty
+
 import numpy as np
 from multihist import poisson_central_interval
 from tqdm import tqdm
@@ -8,7 +10,9 @@ export, __all__ = fastubl.exporter()
 
 
 @export
-def poisson_ul(n, mu_bg=0, cl=fastubl.DEFAULT_CL):
+def poisson_ul(n: ty.Union[int, float, np.ndarray] ,
+               mu_bg: ty.Union[int, float, np.ndarray] = 0,
+               cl=fastubl.DEFAULT_CL):
     """Upper limit on mu_signal, from observing n events
     where mu_bg background events were expected
 

@@ -186,22 +186,35 @@ class BestLikelihood(fastubl.NeymanConstruction):
               * np.sign(r['itv_mu_best'] - mu_null)
               * r['itv_llr'][:,:,mu_i])
 
+        # Never pick invalid intervals
+        ts = np.where(r['all_intervals']['is_valid'],
+                      ts,
+                      np.inf)
+
         # Low t -> strong deficit. Want minimum t across intervals
-        return ts.min(axis=1)
+        best_i = ts.argmin(axis=1)
+        trials = np.arange(r['n_trials'])
+        r['interval'] = (
+            r['all_intervals']['left'][trials, best_i],
+            r['all_intervals']['right'][trials, best_i],
+            r['all_intervals']['n_observed'][trials, best_i])
+
+        return ts[trials, best_i]
 
     def compute_ll_grid(self, r):
         """Computes log L(mu_s) in each interval, for all mu_s in grid
         """
-        x_obs, p_obs, present = r['x_obs'], r['p_obs'], r['present']
-        assert x_obs.shape == present.shape
-        n_trials, n_max_events, n_sources = p_obs.shape
+        n_trials, n_max_events, n_sources = r['p_obs'].shape
 
-        x_obs, p_obs, present = fastubl.endpoints(x_obs, present, p_obs, self.domain)
-        n_endpoints = n_max_events + 2
+        if 'all_intervals' not in r:
+            r['all_intervals'] = all_intervals(r, self.domain, self.dists)
 
-        left, right = interval_indices(n_endpoints)
+        left = r['all_intervals']['left_i']
+        right = r['all_intervals']['right_i']
         n_intervals = left.size
-        acceptance = interval_acceptances(x_obs, left, right, self.dists)
+        p_obs = r['all_intervals']['p_obs_endpoints']
+        present = r['all_intervals']['present_endpoints']
+        n_endpoints = p_obs.shape[1]
 
         # Compute grid of mus for all hypotheses (mu_i, source)
         # Add a few hypotheses higher than self.mu_s_grid;
@@ -211,15 +224,19 @@ class BestLikelihood(fastubl.NeymanConstruction):
             self.mu_s_grid,
             self.mu_s_grid[-1] * np.geomspace(1.1, 10, 10)])
         n_mus = mu_s_grid.size
-        mu_grid = np.concatenate([
-            mu_s_grid[:,None],
-            np.tile(self.true_mu[1:], n_mus).reshape(n_mus, n_sources - 1)],
-            axis=1)
+        if len(self.true_mu) > 1:
+            mu_grid = np.concatenate([
+                mu_s_grid[:,None],
+                np.tile(self.true_mu[1:], n_mus).reshape(n_mus, n_sources - 1)],
+                axis=1)
+        else:
+            mu_grid = mu_s_grid.reshape(n_mus, 1)
         assert mu_grid.shape == (n_mus, n_sources)
 
         # Compute total mu per interval
         # (trial, interval, mu_i)
-        mu_tot = np.sum(mu_grid[None,None,:,:] * acceptance[:,:,None,:],
+        mu_tot = np.sum(mu_grid[None,None,:,:]
+                        * r['all_intervals']['acceptance'][:,:,None,:],
                         axis=-1)
         assert mu_tot.shape == (n_trials, n_intervals, n_mus)
 
@@ -241,11 +258,12 @@ class BestLikelihood(fastubl.NeymanConstruction):
         assert cumsum_inner.shape == (n_trials, n_endpoints, n_mus)
 
         # ... then use interval indices to get only sum over included events
-        # right <= left "intervals" are already removed
+        # all intervals have right > left (see all_intervals)
         # right = left + 1 means no events in the interval -> 0
+        # Right and left event themselves must never be included
         # (trial, interval, mu_i) array
         r['itv_ll'] = -mu_tot + (
-                cumsum_inner[:,right,:] - cumsum_inner[:,left + 1,:])
+                cumsum_inner[:,right - 1,:] - cumsum_inner[:,left,:])
         del cumsum_inner
         assert r['itv_ll'].shape == (n_trials, n_intervals, n_mus)
 
@@ -256,10 +274,6 @@ class BestLikelihood(fastubl.NeymanConstruction):
         r['itv_ll_best'] = np.max(r['itv_ll'], axis=2)
 
         r['itv_llr'] = r['itv_ll'] - r['itv_ll_best'][:,:,None]
-
-        # For diagnosis/inspection
-        r['left'], r['right'] = left, right
-
 
 
 @export
@@ -289,15 +303,19 @@ def interval_acceptances(x_obs_endpoints, left, right, dists):
 
 @export
 def all_intervals(r, domain, dists=None):
-    x_endpoints = fastubl.endpoints(
-        r['x_obs'], r['present'], r['p_obs'], domain, only_x=True)
+    if dists is None:
+        x_endpoints = fastubl.endpoints(
+            r['x_obs'], r['present'], r['p_obs'], domain, only_x=True)
+    else:
+        x_endpoints, present_endpoints, p_obs_endpoints = fastubl.endpoints(
+            r['x_obs'], r['present'], r['p_obs'], domain)
     n_trials, n_endpoints_max = x_endpoints.shape
     left_i, right_i = fastubl.interval_indices(n_endpoints_max)
     n_observed = right_i - left_i - 1  # 0 observed if right = left + 1
 
-    # Intervals may include 'fake' events mapped to right endpoint -> 1
-    # Make sure to include '1' only once as an endpoint:
-    # first occurrence is at endpoint index last_event + 2 = n_event + 1
+    # Intervals may include 'fake' events mapped to right domain boundary.
+    # Make sure to include right domain boundary only once as a possible
+    # endpoint: endpoint index n_events + 1
     n_events = r['present'].sum(axis=1)
     is_valid = right_i[None, :] <= n_events[:, None] + 1
 
@@ -318,4 +336,6 @@ def all_intervals(r, domain, dists=None):
 
     if dists is not None:
         result['acceptance'] = interval_acceptances(x_endpoints, left_i, right_i, dists)
+        result['p_obs_endpoints'] = p_obs_endpoints
+        result['present_endpoints'] = present_endpoints
     return result

@@ -311,7 +311,7 @@ class RegularProcedure(StatisticalProcedure):
             # TODO: test!
             is_included = ts <= self.t_ppf(cl, abs=True)[:, np.newaxis]
         else:
-            raise NotImplementedError(f"Unsupporterd kind '{kind}'")
+            raise NotImplementedError(f"Unsupported kind '{kind}'")
 
         intervals = [None, None]
         n_mus = self.mu_s_grid.size

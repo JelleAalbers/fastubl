@@ -146,7 +146,7 @@ def endpoints(x_obs, present, p_obs, domain, only_x=False):
     # Map fake events to right edge of domain
     x = np.where(present, x_obs, domain[1])
     # Sort by ascending x values
-    x, p_obs, present = sort_all_by_axis1(x, p_obs, present)
+    x, present, p_obs = sort_all_by_axis1(x, present, p_obs)
     # add endpoint markers events at edges of domain
     x = np.concatenate([np.ones((n_trials, 1)) * domain[0],
                         x,
