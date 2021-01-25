@@ -1,5 +1,5 @@
 from functools import partial
-
+from scipy import special
 import numpy as np
 from scipy import stats
 from tqdm import tqdm
@@ -238,6 +238,40 @@ class OptItvCLs(OptItv):
 @export
 class OptItvYellin(OptItv):
     include_background = True
+
+
+@export
+class BestLikelihoodNoBackground(YellinMethod):
+
+    def extra_hash_dict(self):
+        return dict(acceptance_weighting=self.acceptance_weighting)
+
+    def __init__(self, *args, acceptance_weighting=0, **kwargs):
+        self.acceptance_weighting = acceptance_weighting
+        super().__init__(*args, **kwargs)
+
+    def statistic(self, r, mu_null):
+        sizes, skips = self.get_k_largest(r, mu_null)
+        n = np.arange(sizes.shape[1])[np.newaxis, :]
+        mu = sizes * mu_null
+
+        loglr = -(mu - n) + n * np.log(mu) - special.xlogy(n, n)
+        ts = -2 * loglr * np.sign(n - mu)
+
+        # Make smaller intervals less likely to be picked
+        f = self.acceptance_weighting
+        ts = ts * ((1-f) + sizes * f)
+
+        best_n = np.argmin(ts, axis=1)
+
+        trials = np.arange(r['n_trials'])
+        sizes, skips = sizes[trials, best_n], skips[trials, best_n]
+        r['interval'] = (
+            r['x_endpoints'][trials, skips],
+            r['x_endpoints'][trials, skips + best_n + 1],
+            best_n)
+
+        return ts[np.arange(r['n_trials']), best_n]
 
 
 @export

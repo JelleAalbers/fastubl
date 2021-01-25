@@ -104,22 +104,21 @@ class OptimalCutPoisson(fastubl.StatisticalProcedure):
             self.interval)
 
     def mean_sensitivity(self,
-                         interval=(-np.float('inf'), np.float('inf')),
+                         interval=None,
                          mu_s_true=None,
                          cl=fastubl.DEFAULT_CL):
         """Return expected upper limit on mu_s
 
         """
+        if interval is None:
+            interval = self.domain
+
         # Compute expected events in interval
         if mu_s_true is None:
             mu_s_true = self.true_mu[0]
         frac = self.compute_fraction_in_interval(interval)
         mu_bg = (self.true_mu[1:] * frac[1:]).sum()
         mu = mu_s_true * frac[0] + mu_bg
-        if mu == 0.:
-            # This will give a floating point warning in the optimizer...
-            # oh well.
-            return float('inf')
 
         # Sum over a *very* generous range of ns.
         # Restricting this too much would make the function discontinuous,
