@@ -68,7 +68,7 @@ class YellinMethod(fastubl.NeymanConstruction):
             return k_largest(self.sum_cdf(r['x_endpoints'], mu_null))
 
         else:
-            # Without considering backgrounds, the interval sizes
+            # Without (considering) backgrounds, the interval sizes
             # are the same for all mu_null, and based on the x_endpoints
             # we already computed.
             if 'k_largest' not in r:
@@ -78,6 +78,7 @@ class YellinMethod(fastubl.NeymanConstruction):
 
 @export
 class PMax(YellinMethod):
+    gaps_only = False
 
     def statistic(self, r, mu_null):
         (sizes, skips) = self.get_k_largest(r, mu_null)
@@ -85,9 +86,12 @@ class PMax(YellinMethod):
         # (n_trials, events_observed): P(more events in largest iterval)
         p_more = self.p_more_events(sizes, mu_null)
 
-        # Find best interval
-        # (among maximal intervals of different observed count)
-        best_n = np.argmax(p_more, axis=1)   # (n_trials,) array
+        if self.gaps_only:
+            best_n = 0
+        else:
+            # Find best interval
+            # (among maximal intervals of different observed count)
+            best_n = np.argmax(p_more, axis=1)   # (n_trials,) array
 
         trials = np.arange(r['n_trials'])
         sizes, skips = sizes[trials, best_n], skips[trials, best_n]
@@ -111,8 +115,12 @@ class PMax(YellinMethod):
 
         # P(more events in random interval of size)
         n_in_interval = np.arange(sizes.shape[1])[np.newaxis, :]
-        return stats.poisson(sizes * total_events).sf(n_in_interval)
+        return stats.poisson.sf(n_in_interval, mu=sizes * total_events)
 
+
+@export
+class MaxGap(PMax):
+    gaps_only = True
 
 
 @export
@@ -242,13 +250,7 @@ class OptItvYellin(OptItv):
 
 @export
 class BestLikelihoodNoBackground(YellinMethod):
-
-    def extra_hash_dict(self):
-        return dict(acceptance_weighting=self.acceptance_weighting)
-
-    def __init__(self, *args, acceptance_weighting=0, **kwargs):
-        self.acceptance_weighting = acceptance_weighting
-        super().__init__(*args, **kwargs)
+    weighted = False
 
     def statistic(self, r, mu_null):
         sizes, skips = self.get_k_largest(r, mu_null)
@@ -258,9 +260,9 @@ class BestLikelihoodNoBackground(YellinMethod):
         loglr = -(mu - n) + n * np.log(mu) - special.xlogy(n, n)
         ts = -2 * loglr * np.sign(n - mu)
 
-        # Make smaller intervals less likely to be picked
-        f = self.acceptance_weighting
-        ts = ts * ((1-f) + sizes * f)
+        if self.weighted:
+            # Make smaller intervals less likely to be picked
+            ts = self.p_t(ts, sizes)
 
         best_n = np.argmin(ts, axis=1)
 
@@ -272,6 +274,32 @@ class BestLikelihoodNoBackground(YellinMethod):
             best_n)
 
         return ts[np.arange(r['n_trials']), best_n]
+
+    @staticmethod
+    def p_t(t, a):
+        # Clip ridiculously ts, preventing numerical errors below
+        # (e.g. when testing super-high mu)
+        t = t.clip(-30, 30)
+
+        # Convert t to a p-value using large-sample limit
+        # The large-sample limit can be very wrong, but that's ok:
+        # it's just some monotonic transformation of the ts.
+        p = 0.5 * (1 + np.sign(t) * stats.chi2.cdf(np.abs(t), df=1))
+
+        # Cut out central region of size 1-a, map to 0.5
+        # Scale remaining ps inward to 0.5 to fill gap
+        left, right = a/2, 1 -(a/2)
+
+        # Careful with piecewise etc., t=-0 can slip through if a=1...
+        result = np.ones_like(t) * .5
+        result = np.where(p < left, p/a, result)
+        result = np.where(right < p, (p + a - 1)/a, result)
+        return result
+
+
+@export
+class BestLikelihoodNoBackgroundWeighted(BestLikelihoodNoBackground):
+    weighted = True
 
 
 @export
