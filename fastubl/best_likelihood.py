@@ -171,6 +171,7 @@ class BestZechLEEApprox(BestZech):
 
 @export
 class BestLikelihood(fastubl.NeymanConstruction):
+    batch_size = 50
 
     def statistic(self, r, mu_null):
         mu_i = np.searchsorted(self.mu_s_grid, mu_null)

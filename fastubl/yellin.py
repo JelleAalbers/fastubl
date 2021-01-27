@@ -124,6 +124,11 @@ class MaxGap(PMax):
 
 
 @export
+class MaxGapYellin(MaxGap):
+    include_background = True
+
+
+@export
 class PMaxYellin(PMax):
     include_background = True
 
@@ -295,6 +300,11 @@ class BestLikelihoodNoBackground(YellinMethod):
         result = np.where(p < left, p/a, result)
         result = np.where(right < p, (p + a - 1)/a, result)
         return result
+
+
+@export
+class BestLikelihoodNoBackgroundYellin(BestLikelihoodNoBackground):
+    include_background = True
 
 
 @export
