@@ -17,13 +17,11 @@ from tqdm import tqdm
 import fastubl
 
 export, __all__ = fastubl.exporter()
-__all__ += ['DEFAULT_BATCH_SIZE',
-            'DEFAULT_MU_S_GRID',
+__all__ += ['DEFAULT_MU_S_GRID',
             'DEFAULT_CL',
             'DEFAULT_KIND',
             'DEFAULT_DOMAIN']
 
-DEFAULT_BATCH_SIZE = 400
 DEFAULT_MU_S_GRID = np.geomspace(0.1, 50, 100)
 DEFAULT_MU_S_GRID.flags.writeable = False   # Prevent accidental clobbering
 DEFAULT_CL = 0.9
@@ -33,6 +31,7 @@ DEFAULT_DOMAIN = (0., 1.)
 
 @export
 class StatisticalProcedure:
+    batch_size = 1000
     random_unknown_background = 0
     random_unknown_kind = 'spike'
 
@@ -92,13 +91,16 @@ class StatisticalProcedure:
             p_obs[:, :, i] = dist.pdf(x_obs)
         return p_obs
 
-    def make_toys(self, n_trials=DEFAULT_BATCH_SIZE, mu_s_true=None):
+    def make_toys(self, n_trials=None, mu_s_true=None):
         """Return (x, present) for n_trials toy examples, where
             x: (trial_i, event_j), Observed x-value of event_j in trial_i
             present: (trial_i, event_j), whether trial_i has an event_j
             skip_compute: if True, return just (x, present), skipping p computation
             mus_true: Override the signal mu for the toy generation
         """
+        if n_trials is None:
+            n_trials = self.batch_size
+
         # Total and per-source event count per trial
         n_obs_per_source = np.zeros((self.n_sources, n_trials), np.int)
         for i, mu in enumerate(self.true_mu):
@@ -186,7 +188,7 @@ class StatisticalProcedure:
                                    mu_s_true=mu_s_true))[0]
 
     def iter_toys(self, n_trials,
-                  batch_size=DEFAULT_BATCH_SIZE,
+                  batch_size=None,
                   mu_s_true=None,
                   progress=True,
                   desc=None,
@@ -202,6 +204,8 @@ class StatisticalProcedure:
             - toy_maker: StatisticalProcedure to call make_toys for instead
             - progress: if True (default), show a progress bar
         """
+        if batch_size is None:
+            batch_size = self.batch_size
         if toy_maker is None:
             toy_maker = self.make_toys
         else:
@@ -235,7 +239,7 @@ class StatisticalProcedure:
                       kind=DEFAULT_KIND,
                       cl=DEFAULT_CL,
                       n_trials=int(2e4),
-                      batch_size=DEFAULT_BATCH_SIZE,
+                      batch_size=None,
                       progress=False,
                       desc=None,
                       mu_s_true=None,
@@ -247,6 +251,8 @@ class StatisticalProcedure:
         :param cl: Confidence level
             Other arguments are as for iter_toys.
         """
+        if batch_size is None:
+            batch_size = self.batch_size
         intervals = [[], []]
         for r in self.iter_toys(n_trials, batch_size,
                                 mu_s_true=mu_s_true,
@@ -337,7 +343,7 @@ class RegularProcedure(StatisticalProcedure):
     def toy_statistics(
             self,
             n_trials=int(2e4),
-            batch_size=DEFAULT_BATCH_SIZE,
+            batch_size=None,
             mu_s_true=None,
             mu_null=None,
             progress=False,
@@ -347,6 +353,8 @@ class RegularProcedure(StatisticalProcedure):
         :param mu_s_true: True signal rate.
         :param mu_null: Null hypothesis to test. Default is true signal rate.
         """
+        if batch_size is None:
+            batch_size = self.batch_size
         if mu_s_true is None:
             mu_s_true = self.true_mus[0]
         if mu_null is None:
