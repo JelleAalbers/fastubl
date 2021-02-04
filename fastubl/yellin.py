@@ -27,17 +27,6 @@ class YellinMethod(fastubl.NeymanConstruction):
     def statistic(self, r, mu_null):
         raise NotImplementedError
 
-    def mu_all(self, mu_s):
-        """Return (n_sources) array of expected events
-        :param mu_s: Expected signal events, float
-        """
-        if mu_s is None:
-            mu_s = self.true_mu[0]
-        if len(self.dists) == 1:
-            return np.array([mu_s, ])
-        else:
-            return np.concatenate([[mu_s], self.true_mu[1:]])
-
     def sum_cdf(self, x, mu_null):
         """Return cdf of all sources combined
         :param x: Observed x, array (arbitrary shape)

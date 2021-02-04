@@ -13,4 +13,6 @@ from .best_likelihood import *
 from .strictly_sparser import *
 from .combined import *
 
+from .deficit_hawks import *
+
 from .wilks_hist import *

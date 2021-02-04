@@ -22,11 +22,31 @@ __all__ += ['DEFAULT_MU_S_GRID',
             'DEFAULT_KIND',
             'DEFAULT_DOMAIN']
 
-DEFAULT_MU_S_GRID = np.geomspace(0.1, 50, 100)
-DEFAULT_MU_S_GRID.flags.writeable = False   # Prevent accidental clobbering
+
 DEFAULT_CL = 0.9
 DEFAULT_KIND = 'upper'
 DEFAULT_DOMAIN = (0., 1.)
+
+##
+# Create the default mu_s_grid
+##
+# Start with 0.1 - 2, with 0.1 steps
+_q = np.arange(0.1, 2.1, 0.1).tolist()
+# Advance by 5%, or 0.25 * sigma, whichever is lower.
+# Until 150, i.e. +5 sigma if true signal is 100.
+# This way, we should get reasonable results for signals < 100
+# even if there is some unknown background
+while _q[-1] < 150:
+    _q.append(min(
+        _q[-1] + 0.25 * _q[-1]**0.5,
+        _q[-1] * 1.05
+        ))
+# Round to one decimal, and at most three significant figures,
+# so results don't appear unreasonably precise
+#_q = [float('%.3g' % x) for x in _q]
+DEFAULT_MU_S_GRID = np.unique(np.round([float('%.3g' % x) for x in _q], decimals=1))
+DEFAULT_MU_S_GRID.flags.writeable = False   # Prevent accidental clobbering
+del _q
 
 
 @export
@@ -37,7 +57,6 @@ class StatisticalProcedure:
 
     def __init__(self,
                  signal, *backgrounds,
-                 domain=DEFAULT_DOMAIN,
                  mu_s_grid=None):
         """Generic statistical procedure
 
@@ -48,31 +67,42 @@ class StatisticalProcedure:
         :param labels: Sequence of labels;
         :param mu_s_grid: array of mu hypotheses used for testing
         """
-        self.sources = sources = [signal] + list(backgrounds)
-        for s in sources:
-            assert isinstance(s, dict), "Sources must be specified as dicts"
+        self.true_mu = []
+        self.dists = []
+        for s in [signal] + list(backgrounds):
+            assert isinstance(s, tuple), "Specify distributions as tuples"
+            mu, dist = s
+            assert isinstance(dist, stats._distn_infrastructure.rv_frozen), "PDF must be a scipy stats frozen dist"
+            self.true_mu.append(mu)
+            self.dists.append(dist)
+        self.n_sources = len(self.dists)
 
-        self.n_sources = len(sources)
-        self.true_mu = np.array([s.get('mu', 0) for s in sources])
-        self.dists = [getattr(stats, s['distribution'])(**s.get('params', {}))
-                      for s in sources]
-        self.labels =[s.get('label',
-                            'Signal' if i == 0 else f'Background {i-1}')
-                      for i, s in enumerate(sources)]
+        self.identifiers = [(d.dist.name, d.args, d.kwds)
+                            for d in self.dists]
 
         if mu_s_grid is None:
             mu_s_grid = DEFAULT_MU_S_GRID.copy()
         self.mu_s_grid = mu_s_grid
-        self.domain = domain
+        self.domain = self.dists[0].a, self.dists[0].b
+        for pdf in self.dists:
+            assert (pdf.a, pdf.b) == self.domain, "Distributions must have same domains"
 
     def show_pdfs(self, x=None):
         if x is None:
             x = np.linspace(*self.domain, num=1000)
+
         ysum = 0
         for i, dist in enumerate(self.dists):
+            if i == 0:
+                label = 'Signal'
+            elif i == 1 and len(self.dists) == 2:
+                label = 'Background'
+            else:
+                label = f'Background {i}'
             y = self.true_mu[i] * dist.pdf(x)
             ysum += y
-            plt.plot(x, y, label=self.labels[i])
+            plt.plot(x, y, label=label)
+
         plt.plot(x, ysum,
                  color='k', linestyle='--', label='Total')
 
@@ -80,6 +110,29 @@ class StatisticalProcedure:
         plt.xlabel("Some observable x")
         plt.xlim(x[0], x[-1])
         plt.ylabel("d rate / dx")
+
+    def mu_all(self, mu_s=None):
+        """Return (n_sources) array of expected events
+        :param mu_s: Expected signal events, float
+        """
+        if mu_s is None:
+            mu_s = self.true_mu[0]
+        if len(self.dists) == 1:
+            return np.array([mu_s, ])
+        else:
+            return np.concatenate([[mu_s], self.true_mu[1:]])
+
+    def sum_cdf(self, x, mu_s=None):
+        """Compute cdf of all sources combined
+        :param x: Observed x, array (arbitrary shape)
+        :param mu_s: Hypothesized expected signal events
+        """
+        mu_all = self.mu_all(mu_s)
+        sum_cdf = np.stack(
+            [mu * dist.cdf(x)
+             for mu, dist in zip(mu_all, self.dists)],
+            axis=-1).sum(axis=-1) / mu_all.sum()
+        return sum_cdf
 
     def compute_pdfs(self, x_obs):
         """Return p(event | source)
@@ -298,7 +351,7 @@ class RegularProcedure(StatisticalProcedure):
         ts = np.stack([self.statistic(r, mu)
                       for mu in self.mu_s_grid])
 
-        # TODO: consider <= or =
+        # TODO: account for floating-point errors
         # Note: upper limit boundaries are *low* percentiles
         # of the t distribution! See Neyman belt construction diagram.
         kind = kind.lower()
@@ -375,7 +428,7 @@ class RegularProcedure(StatisticalProcedure):
 @export
 class NeymanConstruction(RegularProcedure):
 
-    # TODO: store ppfs instead of raw values, to accommodate large n_trials
+    # TODO: store ppfs instead of raw values, to accommodate large n_trials?
 
     mc_results : np.ndarray = None   # (mu_s, trial i)
     extra_cache_attributes = tuple()
@@ -387,15 +440,19 @@ class NeymanConstruction(RegularProcedure):
                  cache=True,
                  **kwargs):
         super().__init__(*args, **kwargs)
+        self.pre_neyman_init()
+
         if trials_per_s is None:
             trials_per_s = self.default_trials
         self.trials_per_s = trials_per_s
 
         self.hash = fastubl.deterministic_hash(dict(
-            sources=self.sources,
+            identifiers=self.identifiers,
+            background_mus=self.true_mu[1:],
             trials_per_s=self.trials_per_s,
             mu_s_grid=self.mu_s_grid,
             **self.extra_hash_dict()))
+
         fn = os.path.join(
             cache_folder,
             f'{self.__class__.__name__}_{trials_per_s}_{self.hash}')
@@ -416,6 +473,8 @@ class NeymanConstruction(RegularProcedure):
                     for k in self.cache_attributes():
                         setattr(self, k, stuff[k])
                 loaded_from_cache = True
+                assert self.mc_results.dtype == np.float64, \
+                    f"{fn} has imprecise floats, remove and redo Neyman construction"
 
         if not loaded_from_cache:
             self.do_neyman_construction()
@@ -427,12 +486,15 @@ class NeymanConstruction(RegularProcedure):
                     for k in self.cache_attributes()}
                 f.write(blosc.compress(pickle.dumps(to_cache)))
 
+    def pre_neyman_init(self):
+        pass
+
     def cache_attributes(self):
         return tuple(['mc_results'] + list(self.extra_cache_attributes))
 
     def do_neyman_construction(self):
         self.mc_results = np.zeros((self.mu_s_grid.size, self.trials_per_s),
-                                   dtype=np.float32)
+                                   dtype=np.float64)
         for i, mu_s in enumerate(tqdm(self.mu_s_grid,
                                       desc='MC for Neyman construction')):
             self.mc_results[i] = \
