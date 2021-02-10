@@ -111,6 +111,11 @@ class StatisticalProcedure:
         plt.xlim(x[0], x[-1])
         plt.ylabel("d rate / dx")
 
+    def get_mu_i(self, mu_null):
+        mu_i = np.searchsorted(self.mu_s_grid, mu_null)
+        assert self.mu_s_grid[mu_i] == mu_null, "mu_s must be on grid"
+        return mu_i
+
     def mu_all(self, mu_s=None):
         """Return (n_sources) array of expected events
         :param mu_s: Expected signal events, float

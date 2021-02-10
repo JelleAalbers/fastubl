@@ -1,6 +1,6 @@
 import numba
 import numpy as np
-from scipy import stats
+from scipy import special, stats
 from tqdm import tqdm
 
 import fastubl
@@ -23,23 +23,24 @@ class DeficitHawk(fastubl.NeymanConstruction):
         return np.min(self.score_regions(r, mu_null),
                       axis=1)
 
-    def get_mu_i(self, mu_null):
-        mu_i = np.searchsorted(self.mu_s_grid, mu_null)
-        assert self.mu_s_grid[mu_i] == mu_null, "mu_s must be on grid"
-        return mu_i
+    def _consider_background(self):
+        return len(self.dists) > 1
 
 
 @export
 class IntervalHawk(DeficitHawk):
     k_largest_only = False
 
-    interval_info_keys = 'left right n_observed acceptance'.split()
+    interval_info_keys = 'left right n_observed acceptance is_valid'.split()
 
-    def score_intervals(self, interval_info, mu_null):
+    def score_intervals(self, r, interval_info, mu_null):
         raise NotImplementedError
 
     def score_regions(self, r, mu_null):
-        return self.score_intervals(self.interval_info(r), mu_null)
+        itv_info = self.interval_info(r)
+        ts = self.score_intervals(r, itv_info, mu_null)
+        # Never pick invalid intervals
+        return np.where(itv_info['is_valid'], ts, np.inf)
 
     def _region_details(self, r, best_i):
         itv_info = self.interval_info(r)
@@ -52,7 +53,7 @@ class IntervalHawk(DeficitHawk):
             r['all_intervals'] = self.all_intervals(r)
         itv_info = r['all_intervals']
 
-        if self.n_sources > 1 or not self.k_largest_only:
+        if self._consider_background():
             # We have to consider all intervals
             return itv_info
 
@@ -75,10 +76,11 @@ class IntervalHawk(DeficitHawk):
     def all_intervals(self, r):
         itv_info = dict()
 
-        x_endpoints, itv_info['present_endpoints'], itv_info['p_obs_endpoints'] \
+        itv_info['x_endpoints'], itv_info['present_endpoints'], itv_info['p_obs_endpoints'] \
             = fastubl.endpoints(r['x_obs'], r['present'], r['p_obs'], self.domain)
-        n_trials, n_endpoints_max = x_endpoints.shape
+        n_trials, n_endpoints_max = itv_info['x_endpoints'].shape
         left_i, right_i = fastubl.interval_indices(n_endpoints_max)
+        n_intervals = left_i.size
         n_observed = right_i - left_i - 1  # 0 observed if right = left + 1
 
         # Intervals may include 'fake' events mapped to right domain boundary.
@@ -87,9 +89,10 @@ class IntervalHawk(DeficitHawk):
         n_events = r['present'].sum(axis=1)
         is_valid = right_i[None, :] <= n_events[:, None] + 1
 
-        left, right = x_endpoints[:, left_i], x_endpoints[:, right_i]
+        left = itv_info['x_endpoints'][:, left_i]
+        right = itv_info['x_endpoints'][:, right_i]
         n_observed = n_observed[None, :] * np.ones(left.shape, dtype=np.int)
-        assert left.shape == right.shape == n_observed.shape
+        assert left.shape == right.shape == n_observed.shape == (n_trials, n_intervals)
 
         # (0, 1) is indeed marked as valid only once per trial:
         assert ((left[is_valid] == 0.) & (right[is_valid] == 1.)).sum() \
@@ -101,7 +104,8 @@ class IntervalHawk(DeficitHawk):
         itv_info['right_i'] = right_i
         itv_info['n_observed'] = n_observed
         itv_info['is_valid'] = is_valid
-        itv_info['acceptance'] = fastubl.interval_acceptances(x_endpoints, left_i, right_i, self.dists)
+        itv_info['acceptance'] = fastubl.interval_acceptances(
+            itv_info['x_endpoints'], left_i, right_i, self.dists)
         return itv_info
 
     @staticmethod
@@ -150,7 +154,7 @@ class IntervalHawk(DeficitHawk):
 @export
 class YellinPMax(IntervalHawk):
 
-    def score_intervals(self, itv_info, mu_null):
+    def score_intervals(self, r, itv_info, mu_null):
         # P(observe <= N)
         mu = self.mu_all(mu_null)[None,None,:] * itv_info['acceptance']
         return stats.poisson.cdf(itv_info['n_observed'], mu=mu)
@@ -160,7 +164,7 @@ class YellinPMax(IntervalHawk):
 class NaivePMax(IntervalHawk):
     k_largest_only = True
 
-    def score_intervals(self, itv_info, mu_null):
+    def score_intervals(self, r, itv_info, mu_null):
         # P(observe <= N of *signal* events)
         mu = mu_null * itv_info['acceptance'][:,:,0]
         return stats.poisson.cdf(itv_info['n_observed'], mu=mu)
@@ -197,7 +201,7 @@ class YellinOptItv(IntervalHawk):
 
         super().do_neyman_construction()
 
-    def score_intervals(self, interval_info, mu_null):
+    def score_intervals(self, r, interval_info, mu_null):
         mu_i = self.get_mu_i(mu_null)
         sizes = interval_info['acceptance'][:,:,0]
 
@@ -216,3 +220,99 @@ class YellinOptItv(IntervalHawk):
 
         # NB: using -p_smaller, so we can take minimum
         return -p_smaller
+
+
+@export
+class LikelihoodIntervalHawk(IntervalHawk):
+    batch_size = 50
+
+    def score_intervals(self, r, itv_info, mu_null):
+        if not self._consider_background():
+            mu = mu_null * itv_info['acceptance'][...,0]
+            n = itv_info['n_observed']
+
+            # We know mu_best = n, and details of the diffrates cancel
+            loglr = -(mu - n) + n * np.log(mu) - special.xlogy(n, n)
+            ts = -2 * loglr * np.sign(n - mu)
+            return ts
+
+        if 'llr' not in itv_info:
+            self.compute_ll_grid(r, itv_info)
+
+        mu_i = self.get_mu_i(mu_null)
+
+        # Compute (trial, interval) array of ts.
+        # itv_ll: (trial, interval, mu) array
+        # itv_mu_best: (trial, interval) array
+        return (
+                -2
+                * np.sign(itv_info['mu_best'] - mu_null)
+                * itv_info['llr'][:, :, mu_i])
+
+    def compute_ll_grid(self, r, itv_info):
+        n_trials, n_max_events, n_sources = r['p_obs'].shape
+        _, n_intervals = itv_info['left'].shape
+        _, n_endpoints = itv_info['x_endpoints'].shape
+
+        # Compute grid of mus for all hypotheses (mu_i, source)
+        # Add a few hypotheses higher than self.mu_s_grid;
+        # without this t for final mu would often be 0
+        # TODO: Do we need as many as 10? We're looking at sparse intervals
+        mu_s_grid = np.concatenate([
+            self.mu_s_grid,
+            self.mu_s_grid[-1] * np.geomspace(1.1, 10, 10)])
+        n_mus = mu_s_grid.size
+        if len(self.true_mu) > 1:
+            mu_grid = np.concatenate([
+                mu_s_grid[:,None],
+                np.tile(self.true_mu[1:], n_mus).reshape(n_mus, n_sources - 1)],
+                axis=1)
+        else:
+            mu_grid = mu_s_grid.reshape(n_mus, 1)
+        assert mu_grid.shape == (n_mus, n_sources)
+
+        # Compute total mu per interval
+        # (trial, interval, mu_i)
+        #       Inside sum: both (trial, event, mu_i, source) arrays
+        mu_tot = np.sum(mu_grid[None,None,:,:]
+                        * r['all_intervals']['acceptance'][:,:,None,:],
+                        axis=-1)
+        assert mu_tot.shape == (n_trials, n_intervals, n_mus)
+
+        # Compute differential rate sum_sources (p * mu) for each event and mu
+        # Note this does not depend on the interval -- cuts reduce mu
+        # and increase p_obs.
+        # (trial, event, mu_i) array
+        #       Inside sum: both (trial, event, mu_i, source) arrays
+        dr_mu = (r['all_intervals']['p_obs_endpoints'][:,:,None,:]
+                 * mu_grid[None,None,:,:]
+                 ).sum(axis=-1)
+        assert dr_mu.shape == (n_trials, n_endpoints, n_mus)
+
+        # Inner term of log L = sum_events log(sum_sources dr)
+        # Start with cumulative sum over events...
+        # (trial, event, mu_i)
+        cumsum_inner = np.cumsum(
+            special.xlogy(itv_info['present_endpoints'][:,:,None], dr_mu),
+            axis=1)
+        del dr_mu
+        assert cumsum_inner.shape == (n_trials, n_endpoints, n_mus)
+
+        # ... then use interval indices to get only sum over included events
+        # all intervals have right > left (see all_intervals)
+        # right = left + 1 means no events in the interval -> 0
+        # Right and left event themselves must never be included
+        # (trial, interval, mu_i) array
+        itv_info['ll'] = -mu_tot + (
+                cumsum_inner[:,itv_info['right_i'] - 1,:]
+                - cumsum_inner[:,itv_info['left_i'],:])
+        del cumsum_inner
+        assert itv_info['ll'].shape == (n_trials, n_intervals, n_mus)
+
+        # Find best mu in each interval
+        # (trial, interval) array
+        # TODO: fancy indexing might beat doing min twice
+        itv_info['mu_best'] = mu_s_grid[np.argmax(itv_info['ll'], axis=2)]
+        itv_info['ll_best'] = np.max(itv_info['ll'], axis=2)
+
+        itv_info['llr'] = itv_info['ll'] - itv_info['ll_best'][:,:,None]
