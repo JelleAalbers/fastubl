@@ -14,6 +14,9 @@ class DeficitHawk(fastubl.NeymanConstruction):
     def score_regions(self, r, mu_null):
         raise NotImplementedError
 
+    def _region_details(self, r, best_i):
+        raise NotImplementedError
+
     def region_details(self, r, mu_null):
         best_i = np.min(self.score_regions(r, mu_null),
                         axis=1)
@@ -25,6 +28,68 @@ class DeficitHawk(fastubl.NeymanConstruction):
 
     def _consider_background(self):
         return len(self.dists) > 1
+
+
+@export
+class FixedRegionHawk(DeficitHawk):
+
+    regions: tuple
+    randomize_bgfree = False
+
+    region_info: dict
+
+    def extra_hash_dict(self):
+        return dict(regions=self.regions,
+                    randomize_bgfree=self.randomize_bgfree)
+
+    def all_regions(self, r):
+        key = 'all_regions_' + self.hash
+
+        if not 'all_regions' in r:
+            region_info = []
+            for left, right in self.regions:
+                ri = dict()
+                ri['left'], ri['right'] = left, right
+                ri['is_in'] = (
+                    (left <= r['x_obs'])
+                    & (r['x_obs'] < right)
+                    & r['present'])
+                ri['acceptance'] = np.array([d.cdf(right) - d.cdf(left)
+                                             for d in self.dists])
+                ri['n'] = ri['is_in'].sum(axis=1)
+                region_info.append(ri)
+
+            # TODO: transform from list of arrays
+            #  to arrays with one extra dimension?
+
+            r[key] = region_info
+        return r[key]
+
+    def score_regions(self, r, mu_null):
+        if not self._consider_background():
+            return np.array([
+                background_free_loglr(mu=mu_null * ri['acceptance'][0],
+                                      n=ri['n'] + (r['random_number'] if self.randomize_bgfree else 0))
+                for ri in self.all_regions(r)]).T
+
+        raise NotImplementedError
+
+    def _region_details(self, r, best_i):
+        ri = self.all_regions(r)
+        return {k: [ri[k][trial_i, bi]
+                    for trial_i, bi in enumerate(best_i)]
+                for k in ri}
+
+
+@export
+def background_free_loglr(mu, n):
+    """Return signed -2 log likelihood ratio for a background-free
+    experiment.
+    :param mu: Expected number of events
+    :param n: Observed events
+    """
+    loglr = -(mu - n) + n * np.log(mu) - special.xlogy(n, n)
+    return -2 * loglr * np.sign(n - mu)
 
 
 @export
