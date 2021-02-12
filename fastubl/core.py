@@ -54,6 +54,7 @@ class StatisticalProcedure:
     batch_size = 1000
     random_unknown_background = 0
     random_unknown_kind = 'spike'
+    aux_dimensions = 0
 
     def __init__(self,
                  signal, *backgrounds,
@@ -83,9 +84,9 @@ class StatisticalProcedure:
         if mu_s_grid is None:
             mu_s_grid = DEFAULT_MU_S_GRID.copy()
         self.mu_s_grid = mu_s_grid
-        self.domain = self.dists[0].a, self.dists[0].b
-        for pdf in self.dists:
-            assert (pdf.a, pdf.b) == self.domain, "Distributions must have same domains"
+        self.domain = self.dists[0].support()
+        for dist in self.dists:
+            assert dist.support() == self.domain, "Distributions must have same domains / supports"
 
     def show_pdfs(self, x=None):
         if x is None:
@@ -168,14 +169,18 @@ class StatisticalProcedure:
 
         # Total events to simulate (over all trials) per source
         tot_per_source = n_obs_per_source.sum(axis=1)
+        max_trial_size = max(tot_per_source)
 
         # Draw observed x values
-        x_per_source = np.zeros((self.n_sources, max(tot_per_source)))
+        x_per_source = np.zeros((self.n_sources, max_trial_size))
         for i, n in enumerate(tot_per_source):
             x_per_source[i, :n] = self.dists[i].rvs(n)
 
         # Split the events over toy datasets
         x_obs, present = _split_over_trials(n_obs_per_source, x_per_source)
+
+        # Draw aux dimensions (last dimension might be 0-length)
+        aux_obs = np.random.rand(n_trials, max_trial_size, self.aux_dimensions)
 
         # Add random background to each trial, if requested
         if self.random_unknown_background != 0:
@@ -209,7 +214,7 @@ class StatisticalProcedure:
             # TODO: Should we sort so fake events are always on right side?
             # (this might have been assumed somewhere?)
 
-        return x_obs, present
+        return x_obs, present, aux_obs
 
     def compute_ps(self, x):
         """Compute P(event_j from trial_i | source_k)
@@ -221,18 +226,6 @@ class StatisticalProcedure:
             p_obs[:, :, i] = dist.pdf(x)
         p_obs = np.nan_to_num(p_obs)   # Impossible events have p=0
         return p_obs
-
-    def _wrap_toy_maker(self, toy_maker):
-        if toy_maker is None:
-            return self.make_toys
-        assert isinstance(toy_maker, StatisticalProcedure)
-        # Wrap the toy maker so it does not compute p(event|source),
-        # but only simulates
-        def wrapped(*args, **kwargs):
-            kwargs['skip_compute'] = True
-            x, present = toy_maker.make_toys(*args, **kwargs)
-            return self.compute_ps(x), x, present
-        return wrapped
 
     def toy_data(self, n_trials, batch_size=None, mu_s_true=None, toy_maker=None):
         # TODO: make different defaults for different methods
@@ -283,10 +276,11 @@ class StatisticalProcedure:
             if batch_i == n_batches - 1 and last_batch_size != 0:
                 batch_size = last_batch_size
 
-            x_obs, present = toy_maker(batch_size, mu_s_true=mu_s_true)
+            x_obs, present, aux_obs = toy_maker(batch_size, mu_s_true=mu_s_true)
 
             yield dict(p_obs=self.compute_ps(x_obs),
                        x_obs=x_obs,
+                       aux_obs=aux_obs,
                        present=present,
                        # Fixed random number per trial, several applications
                        random_number=np.random.rand(batch_size),

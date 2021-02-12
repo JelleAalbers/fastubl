@@ -16,17 +16,17 @@ import fastubl
 def proc(request):
     bg_slope = 0.2
     return getattr(fastubl, request.param)(
-        dict(distribution='uniform', mu=0),
-        dict(distribution='truncexpon',
-             params=dict(scale=bg_slope, b=1 / bg_slope),
-             mu=5))
+        (0, stats.uniform()),
+        (5, stats.truncexpon(scale=bg_slope, b=1 / bg_slope)))
 
 
 def test_basics(proc):
     # Toy data generation
-    x, present = proc.make_toys(n_trials=10)
+    x, present, aux = proc.make_toys(n_trials=10)
     assert x.shape == present.shape
     assert x.shape[0] == 10
+    assert aux.shape[0] == 10
+    assert aux.shape[2] == 0
     assert present.dtype == np.bool_
 
     # Toy interval generation
