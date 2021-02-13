@@ -34,45 +34,91 @@ class DeficitHawk(fastubl.NeymanConstruction):
 class FixedRegionHawk(DeficitHawk):
 
     regions: tuple
-    randomize_bgfree = False
-
     region_info: dict
 
     def extra_hash_dict(self):
-        return dict(regions=self.regions,
-                    randomize_bgfree=self.randomize_bgfree)
+        return dict(regions=self.regions)
 
     def all_regions(self, r):
+        # Use a method-unique key to cache region info,
+        # the user might try multiple FixedRegionHawk's with different regions.
         key = 'all_regions_' + self.hash
+        if key in r:
+            return r[key]
 
-        if not 'all_regions' in r:
-            region_info = []
-            for left, right in self.regions:
-                ri = dict()
-                ri['left'], ri['right'] = left, right
-                ri['is_in'] = (
-                    (left <= r['x_obs'])
-                    & (r['x_obs'] < right)
-                    & r['present'])
-                ri['acceptance'] = np.array([d.cdf(right) - d.cdf(left)
-                                             for d in self.dists])
-                ri['n'] = ri['is_in'].sum(axis=1)
-                region_info.append(ri)
+        region_info = []
+        for cut_spec in self.regions:
+            ri = dict(cut_spec=cut_spec,
+                      acceptance=np.ones(len(self.dists), dtype=np.float),
+                      is_in=r['present'].copy())
+
+            if isinstance(cut_spec, tuple):
+                # Just cut in the primary dimension
+                cut_spec = {0: cut_spec}
+            for dim, (left, right) in cut_spec.items():
+                if dim == 0:
+                    # Cut in the primary dimension
+                    x = r['x_obs']
+                    ri['acceptance'] *= np.array([d.cdf(right) - d.cdf(left)
+                                                  for d in self.dists])
+
+                else:
+                    # Cut in an auxiliary dimension
+                    # (in which all signals and backgrounds are expected
+                    #  to be distributed uniformly in [0,1])
+                    assert isinstance(dim, int)
+                    aux_dim = dim - 1  # dim 1 = aux dim 0
+                    assert aux_dim < r['aux_obs'].shape[-1], "Not enough aux dims drawn"
+                    x = r['aux_obs'][...,aux_dim]
+                    ri['acceptance'] *= right - left
+
+                ri['is_in'] &= (left <= x) & (x < right)
+
+            ri['n'] = ri['is_in'].sum(axis=1)
+
+            if self._consider_background():
+
+                # Compute likelihood at all hypotheses.. takes time..
+                # TODO: numbafy?
+                ri['ll'] = np.zeros((r['n_trials'], self.mu_s_grid.size),
+                                    dtype=np.float)
+                for mu_i, mu_s in enumerate(self.mu_s_grid):
+                    mus, p_obs = fastubl.acceptance_correction(
+                        acceptance=ri['acceptance'],
+                        mus=self.mu_all(mu_s),
+                        p_obs=r['p_obs'])
+                    _ll = fastubl.log_likelihood(
+                        p_obs=p_obs,
+                        present=ri['is_in'],
+                        mus=mus.reshape(1, -1),
+                        gradient=False)
+                    ri['ll'][:, mu_i] = _ll
+
+                ri['mu_best'] = self.mu_s_grid[np.argmax(ri['ll'], axis=1)]
+                ri['ll_best'] = np.max(ri['ll'], axis=1)
+                ri['llr'] = ri['ll'] - ri['ll_best'][:, None]
 
             # TODO: transform from list of arrays
-            #  to arrays with one extra dimension?
+            #  to arrays with one extra dimension
+            #  to be more like the intervalhawk?
+            region_info.append(ri)
 
-            r[key] = region_info
+        r[key] = region_info
         return r[key]
 
     def score_regions(self, r, mu_null):
         if not self._consider_background():
             return np.array([
                 background_free_loglr(mu=mu_null * ri['acceptance'][0],
-                                      n=ri['n'] + (r['random_number'] if self.randomize_bgfree else 0))
+                                      n=ri['n'])
                 for ri in self.all_regions(r)]).T
 
-        raise NotImplementedError
+        mu_i = self.get_mu_i(mu_null)
+        return np.array([
+                -2
+                * np.sign(ri['mu_best'] - mu_null)
+                * ri['llr'][:, mu_i]
+            for ri in self.all_regions(r)]).T
 
     def _region_details(self, r, best_i):
         ri = self.all_regions(r)

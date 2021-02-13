@@ -60,14 +60,7 @@ class UnbinnedLikelihoodBase:
         assert p_obs.shape[2] == self.n_sources
         mus = self._mu_array(mu_signal)   # (trials, sources)
         if 'acceptance' in r:
-            mus = mus * r['acceptance']
-            # p_obs increases for lower acceptances (PDF renormalizes)
-            # (/0 non-finiteness is handled below, no need for warning)
-            with np.errstate(all='ignore'):
-                p_obs = p_obs / r['acceptance'][:, None, :]
-            # If acceptances = 0, the zero division can cause odd results
-            # -- but no events are possible, so we set p_obs = 0
-            p_obs[~np.isfinite(p_obs)] = 0
+            mus, p_obs = acceptance_correction(r['acceptance'], mus, p_obs)
         return log_likelihood(p_obs, present, mus,
                               weights=r.get('weights'),
                               gradient=gradient)
@@ -75,6 +68,7 @@ class UnbinnedLikelihoodBase:
     def _mu_array(self, mu_s):
         """Return (trials, sources) array of expected events for all sources
         """
+        # TODO: use self.mu_all !
         assert isinstance(mu_s, np.ndarray)
         n_trials = mu_s.size
         mu_bg = (np.array(self.true_mu[1:])[np.newaxis, :]
@@ -171,6 +165,29 @@ class TemperedLikelihoodWilks(TemperedLikelihoodBase,
 
 
 @export
+def acceptance_correction(acceptance, mus, p_obs):
+    """Return mus, p_obs after correcting for acceptance
+
+    :param acceptance: (n_trials, n_sources) or (n_sources) array
+    :param mus: same shape as acceptance
+    :param p_obs: (n_trials, max_trial_size, n_sources) array
+    """
+    assert mus.shape == acceptance.shape
+    mus = mus * acceptance
+
+    if len(acceptance.shape) == 1:
+        acceptance = acceptance.reshape(1, -1)
+    # p_obs increases for lower acceptances (PDF renormalizes)
+    # (/0 non-finiteness is handled below, no need for warning)
+    with np.errstate(all='ignore'):
+        p_obs = p_obs / acceptance[:, None, :]
+    # If acceptances = 0, the zero division can cause odd results
+    # -- but no events are possible, so we set p_obs = 0
+    p_obs[~np.isfinite(p_obs)] = 0
+    return mus, p_obs
+
+
+@export
 def log_likelihood(p_obs, present, mus, weights=None, gradient=True):
     """Compute log likelihood
 
@@ -186,7 +203,7 @@ def log_likelihood(p_obs, present, mus, weights=None, gradient=True):
     """
     n_trials, n_events, n_sources = p_obs.shape
     assert present.shape == (n_trials, n_events)
-    assert mus.shape == (n_trials, n_sources)
+    # assert mus.shape == (n_trials, n_sources)
 
     inner_term = np.sum(p_obs * mus[:, np.newaxis, :],
                         axis=2)  # -> (trial_i, event_i)
