@@ -84,9 +84,13 @@ class StatisticalProcedure:
         if mu_s_grid is None:
             mu_s_grid = DEFAULT_MU_S_GRID.copy()
         self.mu_s_grid = mu_s_grid
-        self.domain = self.dists[0].support()
-        for dist in self.dists:
-            assert dist.support() == self.domain, "Distributions must have same domains / supports"
+        domains = set([dist.support() for dist in self.dists])
+        if not len(domains) == 1:
+            import warnings
+            warnings.warn("Distributions have different supports: " + str(domains))
+            self.domain = min([x[0] for x in domains]), max([x[1] for x in domains])
+        else:
+            self.domain = domains[0]
 
     def show_pdfs(self, x=None):
         if x is None:
@@ -169,10 +173,9 @@ class StatisticalProcedure:
 
         # Total events to simulate (over all trials) per source
         tot_per_source = n_obs_per_source.sum(axis=1)
-        max_trial_size = max(tot_per_source)
 
         # Draw observed x values
-        x_per_source = np.zeros((self.n_sources, max_trial_size))
+        x_per_source = np.zeros((self.n_sources, max(tot_per_source)))
         for i, n in enumerate(tot_per_source):
             x_per_source[i, :n] = self.dists[i].rvs(n)
 
@@ -180,7 +183,7 @@ class StatisticalProcedure:
         x_obs, present = _split_over_trials(n_obs_per_source, x_per_source)
 
         # Draw aux dimensions (last dimension might be 0-length)
-        aux_obs = np.random.rand(n_trials, max_trial_size, self.aux_dimensions)
+        aux_obs = np.random.rand(n_trials, x_obs.shape[1], self.aux_dimensions)
 
         # Add random background to each trial, if requested
         if self.random_unknown_background != 0:
