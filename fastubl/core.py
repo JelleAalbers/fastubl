@@ -1,6 +1,5 @@
 import os
 import pickle
-import typing
 
 try:
     import blosc
@@ -11,7 +10,7 @@ except ImportError:
 import matplotlib.pyplot as plt
 import numba
 import numpy as np
-from scipy import stats
+from scipy import stats, interpolate
 from tqdm import tqdm
 
 import fastubl
@@ -346,54 +345,51 @@ class RegularProcedure(StatisticalProcedure):
     def t_ppf(self, cl=DEFAULT_CL, abs=False):
         raise NotImplementedError
 
-    def compute_intervals(self, r, cl=DEFAULT_CL, kind=DEFAULT_KIND):
-        # Compute (n_mu, n_trials) array with statistics for all mu on data
-        # TODO: this is some overkill, perhaps
-        # Maybe use optimizer instead, or at least offer the option..
-        ts = np.stack([self.statistic(r, mu)
-                      for mu in self.mu_s_grid])
+    def all_ts(self, r):
+        """Return (n_trials, n_mu) array of statistics evaluated at all
+        mu the grid
+        :param r: Dictionary with data
+        """
+        return np.stack([self.statistic(r, mu)
+                         for mu in self.mu_s_grid]).T
 
+    def compute_intervals(self, r, cl=DEFAULT_CL, kind=DEFAULT_KIND):
+        # Get upper and lower bounds of the 'Accept' region
         # TODO: account for floating-point errors
-        # Note: upper limit boundaries are *low* percentiles
-        # of the t distribution! See Neyman belt construction diagram.
+        high = np.inf * np.ones(self.mu_s_grid.size)
+        low = -high
         kind = kind.lower()
         if kind == 'upper':
-            is_included = ts >= self.t_ppf(1 - cl)[:, np.newaxis]
+            # Note: upper limit boundaries are *low* percentiles
+            # of the t distribution! See Neyman belt construction diagram.
+            low = self.t_ppf(1 - cl)
         elif kind == 'lower':
-            is_included = ts <= self.t_ppf(cl)[:, np.newaxis]
+            high = self.t_ppf(cl)
         elif kind == 'central':
             new_cl = 1 - 0.5 * (1 - cl)   # Twice as close to 1
-            is_included =   \
-                (ts >= self.t_ppf(1 - new_cl)[:, np.newaxis]) \
-                & (ts <= self.t_ppf(new_cl)[:, np.newaxis])
+            low = self.t_ppf(1 - new_cl)
+            high = self.t_ppf(new_cl)
         elif kind in ('abs_unified', 'feldman_cousins', 'fc'):
             # Feldman cousins: for every mu, include lowest absolute t values
             # => boundary is a high percentile
             # TODO: test!
-            is_included = ts <= self.t_ppf(cl, abs=True)[:, np.newaxis]
+            high = self.t_ppf(cl, abs=True)
+            low = -high
         else:
             raise NotImplementedError(f"Unsupported kind '{kind}'")
 
-        intervals = [None, None]
-        n_mus = self.mu_s_grid.size
-        for side in [0, 1]:
-            # Get a decreasing/increasing sequence for lower/upper limits
-            x = 1 + np.arange(n_mus, dtype=np.int)
-            if side == 0:
-                x = 2 * n_mus - x
-            # Zero excluded models, limit is at highest remaining number
-            x = x[:, np.newaxis] * is_included
-            intervals[side] = self.mu_s_grid[np.argmax(x, axis=0)]
+        ts = self.all_ts(r)
 
-        # By default, we'd get the lowest/highest mu in the grid for non-central
-        # intervals. Better to go all the way:
-        # TODO: what about extreme results in central intervals?
-        if kind == 'upper':
-            intervals[0] *= 0
-        elif kind == 'central':
-            intervals[1] += float('inf')
-
-        return intervals
+        # TODO: numbafy? probably not worth it.
+        lower, upper = np.zeros((2, r['n_trials']))
+        for i, t in enumerate(ts):
+            lower[i] = fastubl.find_zero(
+                self.mu_s_grid, high - t, last=True,
+                fallback=(np.inf, 0))
+            upper[i] = fastubl.find_zero(
+                self.mu_s_grid, t - low, last=False,
+                fallback=(0, np.inf))
+        return lower, upper
 
     def toy_statistics(
             self,
@@ -517,17 +513,28 @@ class NeymanConstruction(RegularProcedure):
 
     def t_ppf(self, quantile=DEFAULT_CL, abs=False):
         """Return len(self.mu_s_grid) array of critical test statistic values"""
+        # First find the ppf on the Neyman grid
         if abs:
             x = np.abs(self.mc_results)
-            return np.percentile(x, quantile * 100, axis=1)
+            t_neyman = np.percentile(x, quantile * 100, axis=1)
         else:
             # Mc results are already sorted
-            return self.mc_results[:,np.round(quantile * self.trials_per_s).astype(np.int)]
+            t_neyman = self.mc_results[:,np.round(quantile * self.trials_per_s).astype(np.int)]
+
+        # Upsample to the mu_s_grid
+        return self._upsample_neyman(t_neyman)
 
     def t_cdf(self, t, mu_null):
         """Return array of P(t < ... | mu_null)"""
         mu_i = np.argmin(np.abs(self.mu_s_grid - mu_null))
-        return np.searchsorted(self.mc_results[mu_i], t) / self.trials_per_s
+        t_neyman = np.searchsorted(self.mc_results[mu_i], t) / self.trials_per_s
+        return self._upsample_neyman(t_neyman)
+
+    def _upsample_neyman(self, y):
+        return interpolate.interp1d(
+            self.mu_s_neyman_grid, y,
+            bounds_error=False,
+            fill_value=(y[0], y[-1]))(self.mu_s_grid)
 
 
 @numba.njit

@@ -166,3 +166,36 @@ def endpoints(x_obs, present, p_obs, domain, only_x=False):
                               np.zeros((n_trials, 1), dtype=np.bool_)],
                              axis=1)
     return x, present, p_obs
+
+
+@export
+def find_zero(x, y, last=False, fallback=None):
+    """Return x at which y is 0, linearly interpolating y(x)
+
+    :param last: if True, return last zero crossing. Otherwise returns first.
+    :param fallback: return this value if there are no zero crossings.
+       If not provided, ValueError is raised if no crossings are found.
+       If a 2-tuple, return first element if y is always negative, second if
+       y is always positive
+    """
+    x, y = np.asarray(x), np.asarray(y)
+
+    # Indices at which the next y flips sign
+    sign = np.sign(y)
+    crossings = np.where(sign[:-1] != sign[1:])[0]
+
+    if not len(crossings):
+        if fallback is None:
+            raise ValueError("No zero-crossing found")
+        if isinstance(fallback, tuple):
+            if np.min(sign) == 1:
+                # y always positive
+                return fallback[1]
+            return fallback[0]
+        return fallback
+
+    # Interpolation between two points
+    i = crossings[-1] if last else crossings[0]
+    dx = x[i + 1] - x[i]
+    dy = y[i + 1] - y[i]
+    return x[i] - y[i] * dx / dy

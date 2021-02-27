@@ -36,3 +36,11 @@ def test_basics(proc):
                                       progress=False)
     assert lower.shape == upper.shape == (10,)
     assert np.all(lower == 0)
+
+
+def test_find_zero():
+    assert fastubl.find_zero([0, 1], [-1, 1]) == 0.5
+    assert fastubl.find_zero([0, 1, 2], [-1, 0, 1]) == 1
+    assert fastubl.find_zero([0, 1, 2], [1, 0, 1]) == 2
+    assert fastubl.find_zero([0, 12], [1, 2], fallback=(-42, 42)) == 42
+    assert fastubl.find_zero([0, 12], [-1, -2], fallback=(-42, 42)) == -42
