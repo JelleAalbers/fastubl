@@ -89,7 +89,7 @@ class StatisticalProcedure:
             warnings.warn("Distributions have different supports: " + str(domains))
             self.domain = min([x[0] for x in domains]), max([x[1] for x in domains])
         else:
-            self.domain = domains[0]
+            self.domain = list(domains)[0]
 
     def show_pdfs(self, x=None):
         if x is None:

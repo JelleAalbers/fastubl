@@ -205,8 +205,9 @@ class IntervalHawk(DeficitHawk):
         n_observed = n_observed[None, :] * np.ones(left.shape, dtype=np.int)
         assert left.shape == right.shape == n_observed.shape == (n_trials, n_intervals)
 
-        # (0, 1) is indeed marked as valid only once per trial:
-        assert ((left[is_valid] == 0.) & (right[is_valid] == 1.)).sum() \
+        # full domain is indeed marked as valid only once per trial:
+        assert ((left[is_valid] == self.domain[0])
+                & (right[is_valid] == self.domain[1])).sum() \
                == r['n_trials']
 
         itv_info['left'] = left
