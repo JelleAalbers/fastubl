@@ -283,15 +283,20 @@ class NaivePMax(IntervalHawk):
 
 @export
 class YellinOptItv(IntervalHawk):
+    # TODO TEST!
 
     # It would be very inefficient to store this as a 3d array;
     # it would be ~90% 1s for a reasonable mu_s_grid.
     sizes_mc : list  # (mu_i) -> (max_n, mc_trials) arrays
 
-    extra_cache_attributes = ('sizes_mc',)
+    # Precomputation uses mu_s_grid to populate sizes_mc
+    extra_cache_attributes = ('sizes_mc', 'mu_s_grid')
 
     def do_neyman_construction(self):
-        # TODO: compute P(Cn | n) instead, combine with Poisson for P(Cn | mu)?
+        # Compute P(Cn | mu) for all mu in mu_s_grid
+        # (not just the Neyman grid)
+
+        # TODO: maybe compute P(Cn | n) instead, combine with Poisson?
         # -- only useful for Vanilla Yellin, not naive variation
         self.sizes_mc = []
         for mu_i, mu_s in enumerate(tqdm(

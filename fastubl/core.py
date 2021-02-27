@@ -429,8 +429,14 @@ class NeymanConstruction(RegularProcedure):
     # TODO: store ppfs instead of raw values, to accommodate large n_trials?
 
     mc_results : np.ndarray = None   # (mu_s, trial i)
+    # Use a smaller mu_s_grid, with high trials, for the Neyman construction
+    mu_s_neyman_grid = np.array([0.1, 0.2, 0.5,
+                                 1, 2, 3, 5,
+                                 10, 20, 30, 50,
+                                 100])
+
     extra_cache_attributes = tuple()
-    default_trials = 5000
+    default_trials = 25_000
 
     def __init__(self, *args,
                  cache_folder='./fastubl_neyman_cache',
@@ -448,7 +454,7 @@ class NeymanConstruction(RegularProcedure):
             identifiers=self.identifiers,
             background_mus=self.true_mu[1:],
             trials_per_s=self.trials_per_s,
-            mu_s_grid=self.mu_s_grid,
+            mu_s_neyman_grid=self.mu_s_neyman_grid,
             **self.extra_hash_dict()))
 
         fn = os.path.join(
@@ -491,9 +497,9 @@ class NeymanConstruction(RegularProcedure):
         return tuple(['mc_results'] + list(self.extra_cache_attributes))
 
     def do_neyman_construction(self):
-        self.mc_results = np.zeros((self.mu_s_grid.size, self.trials_per_s),
+        self.mc_results = np.zeros((self.mu_s_neyman_grid.size, self.trials_per_s),
                                    dtype=np.float64)
-        for i, mu_s in enumerate(tqdm(self.mu_s_grid,
+        for i, mu_s in enumerate(tqdm(self.mu_s_neyman_grid,
                                       desc='MC for Neyman construction')):
             self.mc_results[i] = \
                 self.toy_statistics(self.trials_per_s,
